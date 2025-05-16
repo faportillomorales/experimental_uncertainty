@@ -183,9 +183,12 @@ def save_results(df, coluna_escolhida, start_idx, end_idx, min_std, media_janela
         file_path (str): Caminho do arquivo original
         data_teste (str): Data do teste experimental
     """
-    # Cria o nome do arquivo de saída
+    # Obtém o diretório e nome base do arquivo original
+    diretorio = os.path.dirname(file_path)
     base_name = os.path.splitext(os.path.basename(file_path))[0]
-    output_file = f"{base_name}_tratado.txt"
+    
+    # Cria o nome do arquivo de saída no mesmo diretório
+    output_file = os.path.join(diretorio, f"{base_name}_tratado.txt")
     
     # Obtém a data atual no formato DD/MM/AAAA
     data_atual = datetime.now().strftime('%d/%m/%Y')
@@ -264,6 +267,65 @@ def plot_time_series(df, colunas):
         linha = idx // n_colunas
         col = idx % n_colunas
         fig.delaxes(axs[linha, col])
+    plt.show()
+
+def plot_windows(df, colunas, start_idx, end_idx, best_window_size):
+    """
+    Plota as janelas de todas as variáveis em subplots organizados em duas colunas.
+    
+    Args:
+        df (pandas.DataFrame): DataFrame com os dados
+        colunas (list): Lista com os nomes das colunas a serem plotadas
+        start_idx (int): Índice inicial da janela
+        end_idx (int): Índice final da janela
+        best_window_size (float): Tamanho da janela encontrada
+    """
+    n_colunas = 2
+    n_linhas = (len(colunas) + 1) // 2
+    
+    # Usa constrained_layout para melhor organização automática
+    fig, axs = plt.subplots(n_linhas, n_colunas, figsize=(16, 3.8*n_linhas), constrained_layout=True)
+    fig.suptitle(f'Janelas das Variáveis (Tamanho: {best_window_size:.1f}s)', fontsize=18, y=1.03)
+    
+    # Plota cada série temporal
+    for idx, coluna in enumerate(colunas):
+        linha = idx // n_colunas
+        col = idx % n_colunas
+        ax = axs[linha, col] if n_linhas > 1 else axs[col]
+        
+        # Plota a série temporal completa
+        ax.plot(df['X_Value'], df[coluna], 'b-', alpha=0.3, label='Série Completa')
+        
+        # Plota a janela
+        ax.plot(df['X_Value'].iloc[start_idx:end_idx], 
+                df[coluna].iloc[start_idx:end_idx], 
+                'r-', alpha=0.8, label='Janela')
+        
+        # Adiciona a média da janela
+        media_janela = df[coluna].iloc[start_idx:end_idx].mean()
+        ax.axhline(y=media_janela, color='g', linestyle='--', 
+                  label=f'Média: {media_janela:.4f}')
+        
+        ax.set_title(coluna, pad=10, fontsize=13, fontweight='bold')
+        if linha == n_linhas - 1:
+            ax.set_xlabel('Tempo (s)', fontsize=11)
+        ax.grid(True, alpha=0.3)
+        ax.tick_params(axis='both', which='major', labelsize=9)
+        
+        # Ajusta os limites do eixo y para melhor visualização
+        y_min = df[coluna].min() * 0.99
+        y_max = df[coluna].max() * 1.01
+        ax.set_ylim(y_min, y_max)
+        
+        # Adiciona legenda
+        ax.legend(fontsize=8, loc='upper right')
+    
+    # Remove subplots vazios se houver
+    for idx in range(len(colunas), n_linhas * n_colunas):
+        linha = idx // n_colunas
+        col = idx % n_colunas
+        fig.delaxes(axs[linha, col])
+    
     plt.show()
 
 # Exemplo de uso:
@@ -355,7 +417,7 @@ if __name__ == "__main__":
         save_results(df, coluna_escolhida, start_idx, end_idx, min_std, media_janela,
                     min_window_size, max_window_size, best_window_size, file_path, data_teste)
         
-        # Plota o gráfico
+        # Plota o gráfico da variável critério
         plt.figure(figsize=(15, 8))
         
         # Plota a série temporal completa
@@ -392,6 +454,10 @@ if __name__ == "__main__":
         
         plt.tight_layout()
         plt.show()
+        
+        # Plota as janelas de todas as variáveis
+        print("\nVisualizando as janelas de todas as variáveis...")
+        plot_windows(df, colunas_analise, start_idx, end_idx, best_window_size)
         
     except ValueError as e:
         print(f"\nErro: {e}")

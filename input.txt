@@ -1,0 +1,16 @@
+PATH = 'CAMINHO_DO_ARQUIVO/NOME_DO_ARQUIVO'
+variavel_criterio = 'J Ar'          # Escolha a variável de critério para realizar o janelamento - Digite o nome exato da coluna para análise
+window_min = 100                    # Digite o tamanho mínimo da janela em segundos
+window_max = 150                    # Digite o tamanho máximo da janela em segundos
+
+### Cálculo de propagação de incerteza ###
+I_g = 275191.0                      # Insira a intensidade padrão para o gás (Calibração do densitômetro)
+I_l = 164175.5                      # Insira a intensidade padrão para o líquido (Calibração do densitômetro)
+E_PIT-M-0101 = 0.2                  # Insira o erro de medição do sensor de pressão
+E_PDT-M-0101-40kPa = 0.1            # Insira o erro de medição do diferencial de pressão de 40kPa
+E_PDT-M-0101B-10kPa = 0.1           # Insira o erro de medição do diferencial de pressão de 10kPa
+E_PDT-M-0101C-3kPa = 0.1            # Insira o erro de medição do diferencial de pressão de 3kPa
+E_TIT-M-0101 = 0.1                  # Insira o erro de medição do sensor de temperatura
+E_Densitometro = 0.1
+E_J_Ar = 0.1                          # Insira o erro de medição do sensor de vazão
+E_J_Agua = 0.1                        # Insira o erro de medição do sensor de vazão
