@@ -166,9 +166,10 @@ def read_file(file_path):
     return df, data_teste
 
 def save_results(df, coluna_escolhida, start_idx, end_idx, min_std, media_janela, 
-                min_window_size, max_window_size, best_window_size, file_path, data_teste):
+                min_window_size, max_window_size, best_window_size, file_path, data_teste, nomes=None, medias=None, desvios=None, uAs=None):
     """
     Salva os resultados da análise em um arquivo de saída.
+    Agora inclui as estatísticas (média, desvio padrão, uA) de cada variável de interesse.
     
     Args:
         df (pandas.DataFrame): DataFrame com os dados originais
@@ -182,6 +183,10 @@ def save_results(df, coluna_escolhida, start_idx, end_idx, min_std, media_janela
         best_window_size (float): Tamanho ótimo da janela encontrado
         file_path (str): Caminho do arquivo original
         data_teste (str): Data do teste experimental
+        nomes (list): Lista de nomes das variáveis de interesse
+        medias (list): Lista de médias das variáveis
+        desvios (list): Lista de desvios padrão das variáveis
+        uAs (list): Lista de incertezas tipo A para cada variável
     """
     # Obtém o diretório e nome base do arquivo original
     diretorio = os.path.dirname(file_path)
@@ -208,6 +213,16 @@ def save_results(df, coluna_escolhida, start_idx, end_idx, min_std, media_janela
         f"Tempo Inicial: {df['X_Value'].iloc[start_idx]:.2f} segundos",
         f"Tempo Final: {df['X_Value'].iloc[end_idx-1]:.2f} segundos",
         f"Número de Pontos: {end_idx - start_idx}",
+    ]
+    
+    # Adiciona a seção de estatísticas se fornecidas
+    if nomes is not None and medias is not None and desvios is not None and uAs is not None:
+        header.append("***Estatísticas das variáveis na janela***")
+        header.append("Variável: Média | Desvio padrão | Incerteza tipo A")
+        for nome, media, desvio, uA in zip(nomes, medias, desvios, uAs):
+            header.append(f"{nome}: {media:.6f} | {desvio:.6f} | {uA:.6f}")
+    
+    header += [
         "***Dados da Janela***",
         "***End_of_Header***"
     ]
@@ -328,6 +343,93 @@ def plot_windows(df, colunas, start_idx, end_idx, best_window_size):
     
     plt.show()
 
+def uncert_propagation(df, colunas, start_idx, end_idx, best_window_size):
+    """
+    Propaga as incertezas das variáveis para a variável critério.
+    Para cada coluna de interesse, calcula a média, o desvio padrão e a incerteza estatística tipo A (padrão da média) na janela selecionada.
+    Retorna listas com os resultados para uso posterior.
+    """
+    print("\nCálculo da média, desvio padrão e incerteza estatística tipo A para cada variável na janela:")
+    n = end_idx - start_idx
+    medias = []
+    desvios = []
+    uAs = []
+    for coluna in colunas:
+        dados_janela = df[coluna].iloc[start_idx:end_idx]
+        media = dados_janela.mean()
+        desvio = dados_janela.std(ddof=1)
+        uA = desvio / (n ** 0.5)
+        medias.append(media)
+        desvios.append(desvio)
+        uAs.append(uA)
+        print(f"{coluna:20} | Média: {media:.6f} | Desvio padrão: {desvio:.6f} | Incerteza tipo A: {uA:.6f}")
+    return colunas, medias, desvios, uAs
+
+def calc_frictional_pressure_gradient(df, colunas, start_idx, end_idx, best_window_size):
+    """
+    Calcula o gradiente de pressão friccional para cada variável na janela selecionada.
+    Também encontra os índices das colunas que começam com 'PDT'.
+    Calcula a série temporal da densidade do ar na janela usando a equação de estado.
+    A pressão é lida como manométrica em bares e convertida para absoluta em Pascal.
+    Armazena os resultados em um DataFrame dP_F_df e o retorna.
+    """
+    indices_pdt = [i for i, nome in enumerate(colunas) if nome.startswith("PDT")]
+
+    L = 1.7 # m
+    g = 9.81 # m/s^2 constante
+    rho_agua = 1000 # kg/m^3 constante
+    R = 8.314       # Constante dos gases ideais (J/(mol·K))
+    alpha = 0.5
+    theta = 0 # graus
+
+    # Obtém as séries temporais de pressão (PIT-M-0101) e temperatura (TIT-M-0101) na janela
+    try:
+        pressao_ar_bar = df['PIT-M-0101'].iloc[start_idx:end_idx]
+        temp_ar_celsius = df['TIT-M-0101'].iloc[start_idx:end_idx]
+        
+        # Converte pressão manométrica de bar para Pascal (adicionando 1 bar atmosférico)
+        pressao_ar_pa = (pressao_ar_bar + 1) * 1e5
+        
+        # Converte temperatura para Kelvin (assumindo que está em Celsius)
+        temp_ar_k = temp_ar_celsius + 273.15
+        
+        # Calcula a densidade do ar usando a equação de estado
+        # Evita divisão por zero se a temperatura for zero Kelvin (caso improvável)
+        rho_ar = (pressao_ar_pa) / (R * temp_ar_k)
+        
+        print("\nSérie temporal da densidade do ar calculada na janela.")
+        # print(densidade_ar.head()) # Opcional: mostrar as primeiras linhas da série calculada
+        
+    except KeyError as e:
+        print(f"Erro ao encontrar colunas para cálculo da densidade do ar: {e}")
+        rho_ar = None # Garante que densidade_ar seja None se ocorrer erro
+
+    # Inicializa o DataFrame para armazenar os resultados de dP_F
+    dP_F_df = pd.DataFrame()
+
+    # Calcula e armazena as séries temporais de dP_F para cada coluna PDT
+    for i in indices_pdt:
+        coluna_pdt_nome = colunas[i]
+        # Assumindo que alpha e theta são constantes para este cálculo
+        # Lembre-se de que np.sin espera radianos
+        theta_rad = np.deg2rad(theta) # Converte theta para radianos
+        
+        # Calcula a série temporal dP_F usando a fórmula fornecida
+        delta_p_prime = abs(df[coluna_pdt_nome].iloc[start_idx:end_idx])
+        termo_gravitacional = (rho_agua - rho_ar) * alpha * g * np.sin(theta_rad)
+        
+        # Calcula o gradiente de pressão friccional
+        dP_F_over_dz_series = (delta_p_prime / L) + termo_gravitacional
+        
+        # Armazena a série calculada no DataFrame dP_F_df com o nome da coluna original
+        dP_F_df[coluna_pdt_nome] = dP_F_over_dz_series
+
+    # Agora dP_F_df contém as séries temporais de dP_F/dz para cada coluna PDT
+    print("\nDataFrame dP_F_df criado com as séries temporais de gradiente de pressão friccional para colunas PDT.")
+    # print(dP_F_df.head()) # Opcional: mostrar as primeiras linhas do DataFrame
+
+    return dP_F_df # Retorna o DataFrame
+
 # Exemplo de uso:
 if __name__ == "__main__":
     file_path = "example/ID4"
@@ -409,13 +511,13 @@ if __name__ == "__main__":
         print(f"Tempo final da janela: {df['X_Value'].iloc[end_idx-1]:.2f} segundos")
         print(f"Número de pontos na janela: {end_idx - start_idx}")
         
-        # Mostra os dados da janela
-        print("\nDados da janela com menor desvio padrão:")
-        print(df.iloc[start_idx:end_idx][['X_Value', coluna_escolhida]])
+        # Calcula e exibe a incerteza tipo A para cada variável na janela (e salva arrays)
+        nomes, medias, desvios, uAs = uncert_propagation(df, colunas_analise, start_idx, end_idx, best_window_size)
         
         # Salva os resultados em um arquivo
         save_results(df, coluna_escolhida, start_idx, end_idx, min_std, media_janela,
-                    min_window_size, max_window_size, best_window_size, file_path, data_teste)
+                    min_window_size, max_window_size, best_window_size, file_path, data_teste,
+                    nomes=colunas_analise, medias=medias, desvios=desvios, uAs=uAs)
         
         # Plota o gráfico da variável critério
         plt.figure(figsize=(15, 8))
@@ -459,5 +561,24 @@ if __name__ == "__main__":
         print("\nVisualizando as janelas de todas as variáveis...")
         plot_windows(df, colunas_analise, start_idx, end_idx, best_window_size)
         
+        # Calcula o gradiente de pressão friccional e plota
+        print("\nCalculando e plotando o gradiente de pressão friccional (dP_F/dz) para colunas PDT...")
+        dP_F_df = calc_frictional_pressure_gradient(df, colunas_analise, start_idx, end_idx, best_window_size)
+        
+        # Plota as séries temporais de dP_F_df em um único gráfico
+        if dP_F_df is not None and not dP_F_df.empty:
+            plt.figure(figsize=(15, 8))
+            for col in dP_F_df.columns:
+                plt.plot(df['X_Value'].iloc[start_idx:end_idx], dP_F_df[col], label=col)
+            plt.xlabel('Tempo (s)', fontsize=12)
+            plt.ylabel('Gradiente de Pressão Friccional (Pa/m)', fontsize=12)
+            plt.title('Séries Temporais do Gradiente de Pressão Friccional (dP_F/dz) na Janela', fontsize=14)
+            plt.grid(True, alpha=0.3)
+            plt.legend(fontsize=10)
+            plt.tight_layout()
+            plt.show()
+        else:
+            print("Não foi possível calcular o gradiente de pressão friccional para plotar.")
+
     except ValueError as e:
         print(f"\nErro: {e}")
