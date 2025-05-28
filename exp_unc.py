@@ -12,19 +12,18 @@ from CoolProp.CoolProp import PropsSI
 file_path = 'example/AWD45/AWD45ID01/AWD45ID01' #Insira o caminho do arquivo a ser analisado
 variavel_criterio = 'J Ar'          # Escolha a variável de critério para realizar o janelamento - Digite o nome exato da coluna para análise
 
-theta = 45      # Inclinação da plataforma
 L = 1.7         # m comprimento entre as tomadas de diferencial de pressão
 g = 9.81        # m/s² 
 
 sensor_Yokogawa = 'PDT-M-0101D-30Kpa_mA'
+sensor_Endress = 'PDT-M-0101-40kPa_mA'
 rho_s = 962     # kg/m³
-direction ='Downward'
+
 ### Colunas de interesse -> Insira o nome das colunas a plotar e avaliar do arquivo .dat
 # Lista de colunas para análise: [nome_coluna, apelido, unidade]
 colunas_analise = [
-    
-    ['PDT-M-0101-40kPa_mA', r'|\delta P_{40\,kPa}|', r'[Pa]'],
-    ['PDT-M-0101D-30Kpa_mA', r'|\delta P_{30\,kPa}|', r'[Pa]'],
+    [sensor_Endress, r'|\Delta P_{40\,kPa}|', r'[Pa]'],
+    [sensor_Yokogawa, r'|\Delta P_{30\,kPa}|', r'[Pa]'],
     ['Alpha', r'\alpha', r''],
     ['J Agua', r'J_{water}', r'[m/s]'],
     ['J Ar', r'J_{air}', r'[m/s]'],
@@ -38,7 +37,7 @@ colunas_analise = [
 # Valores de calibração do densitômetro
 I_g = 253892                     # Insira a intensidade padrão para o gás (Calibração do densitômetro)
 I_f = 151174                      # Insira a intensidade padrão para o líquido (Calibração do densitômetro)
-#
+
 p_PIT_M_0101 = 0.2                  # Insira a precisão de medição do sensor de pressão
 P_PDT_M_0101_40kPa = 0.1            # Insira a precisão de medição do diferencial de pressão de 40kPa
 p_PDT_M_0101D_30Kpa = 0.055         # Insira a precisão de medição do diferencial de pressão de 30kPa  0.055% do span
@@ -208,7 +207,8 @@ def read_file(file_path):
     return df, data_teste
 
 def save_results(df, coluna_escolhida, start_idx, end_idx, min_std, media_janela, 
-                min_window_size, max_window_size, best_window_size, file_path, data_teste, nomes=None, medias=None, desvios=None, uAs=None):
+                min_window_size, max_window_size, best_window_size, file_path, data_teste, 
+                fluid_1, fluid_2, direction, theta, ID, nomes=None, medias=None, desvios=None, uAs=None):
     """
     Salva os resultados da análise em um arquivo de saída.
     Agora inclui as estatísticas (média, desvio padrão, uA) de cada variável de interesse.
@@ -225,6 +225,11 @@ def save_results(df, coluna_escolhida, start_idx, end_idx, min_std, media_janela
         best_window_size (float): Tamanho ótimo da janela encontrado
         file_path (str): Caminho do arquivo original
         data_teste (str): Data do teste experimental
+        fluid_1 (str): Primeiro fluido do experimento
+        fluid_2 (str): Segundo fluido do experimento
+        direction (str): Direção do escoamento
+        theta (int): Inclinação em graus
+        ID (str): Identificador do ponto experimental
         nomes (list): Lista de nomes das variáveis de interesse
         medias (list): Lista de médias das variáveis
         desvios (list): Lista de desvios padrão das variáveis
@@ -246,6 +251,11 @@ def save_results(df, coluna_escolhida, start_idx, end_idx, min_std, media_janela
         f"Data do teste experimental: {data_teste if data_teste else 'Não encontrada'}",
         f"Data tratamento: {data_atual}",
         f"Arquivo Original: {file_path}",
+        f"ID do ponto: {ID}",
+        f"Fluido 1: {fluid_1}",
+        f"Fluido 2: {fluid_2}",
+        f"Direção do escoamento: {direction}",
+        f"Inclinação (theta): {theta}°",
         f"Coluna Critério: {coluna_escolhida}",
         f"Tamanho Mínimo da Janela: {min_window_size:.1f} segundos",
         f"Tamanho Máximo da Janela: {max_window_size:.1f} segundos",
@@ -378,8 +388,9 @@ def plot_windows(df, colunas, start_idx, end_idx, best_window_size, output_dir, 
         # Ajuste automático do eixo y com margem de 40% (igual ao plot_time_series)
         y_min = y_data.min()
         y_max = y_data.max()
-        margem = 0.40 * (y_max - y_min) if y_max != y_min else 1
-        ax.set_ylim(y_min - margem, y_max + margem)
+        margem_max = 1.01*y_max
+        margem_min = 0.99*y_min
+        ax.set_ylim(margem_min, margem_max)
     for idx in range(len(colunas), n_linhas * n_colunas):
         linha = idx // n_colunas
         col = idx % n_colunas
@@ -512,6 +523,40 @@ def calc_frictional_pressure_gradient(df, colunas, start_idx, end_idx, best_wind
 
     return dP_F_df # Retorna o DataFrame
 
+def extract_info_from_filename(filename):
+    """
+    Extrai informações do nome do arquivo experimental.
+    Formato esperado: XXX##ID## onde:
+    - X: letra indicando o fluido (A:Air, W:Water, O:Oil, S:SF6)
+    - #: número indicando a inclinação em graus
+    - ID: identificador do ponto experimental
+    """
+    # Dicionários para mapear letras para fluidos e direções
+    fluid_map = {
+        'A': 'Air',
+        'W': 'Water',
+        'O': 'Oil',
+        'S': 'SF6'
+    }
+    
+    direction_map = {
+        'H': 'Horizontal',
+        'U': 'Upward',
+        'D': 'Downward'
+    }
+    
+    # Obtém apenas o nome do arquivo sem extensão e caminho
+    base_name = os.path.splitext(os.path.basename(filename))[0]
+    
+    # Extrai as informações
+    fluid_1 = fluid_map.get(base_name[0], 'Unknown')
+    fluid_2 = fluid_map.get(base_name[1], 'Unknown')
+    direction = direction_map.get(base_name[2], 'Unknown')
+    theta = int(base_name[3:5])  # Extrai os dois dígitos da inclinação
+    ID = base_name[5:]  # Resto do nome é o ID
+    
+    return fluid_1, fluid_2, direction, theta, ID
+
 # Exemplo de uso:
 if __name__ == "__main__":
     
@@ -520,6 +565,15 @@ if __name__ == "__main__":
     print("Dimensões do DataFrame:", df.shape)
     print("\nNomes das colunas:")
     print(df.columns.tolist())
+    
+    # Extrai informações do nome do arquivo
+    fluid_1, fluid_2, direction, theta, ID = extract_info_from_filename(file_path)
+    print(f"\nInformações extraídas do nome do arquivo:")
+    print(f"Fluido 1: {fluid_1}")
+    print(f"Fluido 2: {fluid_2}")
+    print(f"Direção: {direction}")
+    print(f"Inclinação (theta): {theta}°")
+    print(f"ID do ponto: {ID}")
     
     # Obtém o diretório e nome base do arquivo original para salvar as imagens
     output_dir = os.path.dirname(file_path)
@@ -649,6 +703,7 @@ if __name__ == "__main__":
     # Salva os resultados em um arquivo
     save_results(df, coluna_escolhida, start_idx, end_idx, min_std, media_janela,
                 min_window_size, max_window_size, best_window_size, file_path, data_teste,
+                fluid_1, fluid_2, direction, theta, ID,
                 nomes=colunas_analise_filtradas, medias=medias, desvios=desvios, uAs=uAs)
     
     # Plota o gráfico da variável critério e salva a imagem
