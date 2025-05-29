@@ -9,15 +9,12 @@ from CoolProp.CoolProp import PropsSI
 ####################################################################################################################################################
 #                                            INPUTS
 ####################################################################################################################################################
-file_path = 'example/AWD45/AWD45ID01/AWD45ID01' #Insira o caminho do arquivo a ser analisado
-variavel_criterio = 'J Ar'          # Escolha a variável de critério para realizar o janelamento - Digite o nome exato da coluna para análise
+file_path = 'example/AWD45/AWD45P15/AWD45P15' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
 
 L = 1.7         # m comprimento entre as tomadas de diferencial de pressão
-g = 9.81        # m/s² 
 
 sensor_Yokogawa = 'PDT-M-0101D-30Kpa_mA'
 sensor_Endress = 'PDT-M-0101-40kPa_mA'
-rho_s = 962     # kg/m³
 
 ### Colunas de interesse -> Insira o nome das colunas a plotar e avaliar do arquivo .dat
 # Lista de colunas para análise: [nome_coluna, apelido, unidade]
@@ -26,31 +23,21 @@ colunas_analise = [
     [sensor_Yokogawa, r'|\Delta P_{30\,kPa}|', r'[Pa]'],
     ['Alpha', r'\alpha', r''],
     ['J Agua', r'J_{water}', r'[m/s]'],
-    ['J Ar', r'J_{air}', r'[m/s]'],
-    ['FT-A-0303', r'Q_{air}', r'[m³/h]'],
+    ['J Ar corrigido', r'J_{air}', r'[m/s]'],
+    ['FT-A-0302', r'Q_{air}', r'[m³/h]'],
     ['PIT-M-0101', r'Gauge\ Pressure', r'[Bar]'],
     ['TIT-M-0101', r'Temperature', r'[°C]'],
     ['rho_g', r'\rho_{air}', r'[kg/m³]']
 ]
 
-### Cálculo de propagação de incerteza ###
 # Valores de calibração do densitômetro
-I_g = 253892                     # Insira a intensidade padrão para o gás (Calibração do densitômetro)
-I_f = 151174                      # Insira a intensidade padrão para o líquido (Calibração do densitômetro)
-
-p_PIT_M_0101 = 0.2                  # Insira a precisão de medição do sensor de pressão
-P_PDT_M_0101_40kPa = 0.1            # Insira a precisão de medição do diferencial de pressão de 40kPa
-p_PDT_M_0101D_30Kpa = 0.055         # Insira a precisão de medição do diferencial de pressão de 30kPa  0.055% do span
-span_yokogawa = 30E3 #Pa
-p_PDT_M_0101B_10kPa = 0.1           # Insira a precisão de medição do diferencial de pressão de 10kPa
-p_PDT_M_0101C_3kPa = 0.1            # Insira a precisão de medição do diferencial de pressão de 3kPa
-p_TIT_M_0101 = 0.1                  # Insira a precisão de medição do sensor de temperatura
-E_Densitometro = 0.1
-E_J_Agua = 0.1                        # Insira o erro de medição do sensor de vazão
-E_J_Ar = 0.1                          # Insira o erro de medição do sensor de vazão
+I_g = 252883                     # Insira a intensidade padrão para o gás (Calibração do densitômetro)
+I_f = 151287                      # Insira a intensidade padrão para o líquido (Calibração do densitômetro)
 ####################################################################################################################################################
 #       '                                   END INPUTS
 ####################################################################################################################################################
+g = 9.81        # m/s² 
+rho_s = 962     # kg/m³         Densidade do silicone nas tomadas do sensor Yokogawa
 
 def find_min_std_window(df, column_name, min_window_size, max_window_size):
     """
@@ -203,37 +190,51 @@ def read_file(file_path):
                      na_values=[''],  # Valores vazios são considerados NaN
                      encoding='utf-8',  # Codificação do arquivo
                      names=column_names)  # Usa os nomes das colunas lidos do arquivo
-    
+    ##########################################################
+    df['J Ar corrigido'] = df['J Ar'] * (1 - 0.06675) ###CUIDADO
+    ##########################################################
     return df, data_teste
+
+def format_filename(apelido, unidade):
+    """
+    Formata o nome do arquivo removendo caracteres LaTeX e adicionando a unidade.
+    Exemplo: r'\Delta P_{40\,kPa}' [Pa] -> Delta_P_40kPa [Pa]
+    """
+    # Remove caracteres LaTeX comuns
+    nome = apelido.replace('\\', '')  # Remove barras invertidas
+    nome = nome.replace('{', '')      # Remove chaves
+    nome = nome.replace('}', '')
+    nome = nome.replace('\\,', '')    # Remove espaços LaTeX
+    nome = nome.replace('\\frac', '') # Remove frações
+    nome = nome.replace('$', '')      # Remove símbolos de dólar
+    
+    # Remove caracteres especiais que podem causar problemas no nome do arquivo
+    caracteres_invalidos = ['|', '/', '\\', ':', '*', '?', '"', '<', '>', ',', ';', '=', ' ']
+    for char in caracteres_invalidos:
+        nome = nome.replace(char, '_')
+    
+    # Remove underscores múltiplos
+    while '__' in nome:
+        nome = nome.replace('__', '_')
+    
+    # Remove underscores no início e fim
+    nome = nome.strip('_')
+    
+    # Adiciona a unidade
+    if unidade:
+        # Remove colchetes da unidade
+        unidade = unidade.replace('[', '').replace(']', '')
+        nome = f"{nome}_{unidade}"
+    
+    return nome
 
 def save_results(df, coluna_escolhida, start_idx, end_idx, min_std, media_janela, 
                 min_window_size, max_window_size, best_window_size, file_path, data_teste, 
-                fluid_1, fluid_2, direction, theta, ID, nomes=None, medias=None, desvios=None, uAs=None):
+                fluid_1, fluid_2, direction, theta, ID, nomes=None, medias=None, desvios=None, uAs=None,
+                escolha_janela=None):
     """
     Salva os resultados da análise em um arquivo de saída.
     Agora inclui as estatísticas (média, desvio padrão, uA) de cada variável de interesse.
-    
-    Args:
-        df (pandas.DataFrame): DataFrame com os dados originais
-        coluna_escolhida (str): Nome da coluna usada como critério
-        start_idx (int): Índice inicial da janela
-        end_idx (int): Índice final da janela
-        min_std (float): Desvio padrão mínimo encontrado
-        media_janela (float): Média da janela
-        min_window_size (float): Tamanho mínimo da janela configurado
-        max_window_size (float): Tamanho máximo da janela configurado
-        best_window_size (float): Tamanho ótimo da janela encontrado
-        file_path (str): Caminho do arquivo original
-        data_teste (str): Data do teste experimental
-        fluid_1 (str): Primeiro fluido do experimento
-        fluid_2 (str): Segundo fluido do experimento
-        direction (str): Direção do escoamento
-        theta (int): Inclinação em graus
-        ID (str): Identificador do ponto experimental
-        nomes (list): Lista de nomes das variáveis de interesse
-        medias (list): Lista de médias das variáveis
-        desvios (list): Lista de desvios padrão das variáveis
-        uAs (list): Lista de incertezas tipo A para cada variável
     """
     # Obtém o diretório e nome base do arquivo original
     diretorio = os.path.dirname(file_path)
@@ -256,23 +257,79 @@ def save_results(df, coluna_escolhida, start_idx, end_idx, min_std, media_janela
         f"Fluido 2: {fluid_2}",
         f"Direção do escoamento: {direction}",
         f"Inclinação (theta): {theta}°",
-        f"Coluna Critério: {coluna_escolhida}",
-        f"Tamanho Mínimo da Janela: {min_window_size:.1f} segundos",
-        f"Tamanho Máximo da Janela: {max_window_size:.1f} segundos",
-        f"Tamanho Ótimo da Janela: {best_window_size:.1f} segundos",
-        f"Média da Janela: {media_janela:.4f}",
-        f"Desvio Padrão: {min_std:.4f}",
-        f"Tempo Inicial: {df['X_Value'].iloc[start_idx]:.2f} segundos",
-        f"Tempo Final: {df['X_Value'].iloc[end_idx-1]:.2f} segundos",
-        f"Número de Pontos: {end_idx - start_idx}",
     ]
+    
+    # Adiciona informações específicas baseado no tipo de janela
+    if escolha_janela == '1':  # Janela manual
+        header.extend([
+            "***Janela Manual***",
+            f"Tamanho da Janela: {best_window_size:.1f} segundos",
+            f"Tempo Inicial: {df['X_Value'].iloc[start_idx]:.2f} segundos",
+            f"Tempo Final: {df['X_Value'].iloc[end_idx-1]:.2f} segundos",
+            f"Número de Pontos: {end_idx - start_idx}",
+        ])
+    else:  # Janela automática
+        header.extend([
+            f"Coluna Critério: {coluna_escolhida}",
+            f"Tamanho Mínimo da Janela: {min_window_size:.1f} segundos",
+            f"Tamanho Máximo da Janela: {max_window_size:.1f} segundos",
+            f"Tamanho Ótimo da Janela: {best_window_size:.1f} segundos",
+            f"Média da Janela: {media_janela:.4f}",
+            f"Desvio Padrão: {min_std:.4f}",
+            f"Tempo Inicial: {df['X_Value'].iloc[start_idx]:.2f} segundos",
+            f"Tempo Final: {df['X_Value'].iloc[end_idx-1]:.2f} segundos",
+            f"Número de Pontos: {end_idx - start_idx}",
+        ])
     
     # Adiciona a seção de estatísticas se fornecidas
     if nomes is not None and medias is not None and desvios is not None and uAs is not None:
         header.append("***Estatísticas das variáveis na janela***")
         header.append("Variável: Média | Desvio padrão | Incerteza tipo A")
+        
+        # Adiciona as estatísticas das variáveis originais
         for nome, media, desvio, uA in zip(nomes, medias, desvios, uAs):
-            header.append(f"{nome}: {media:.6f} | {desvio:.6f} | {uA:.6f}")
+            # Encontra o apelido e unidade para cada variável
+            apelido_var = nome[0]
+            unidade_var = ''
+            for col in colunas_analise_filtradas:
+                if isinstance(col, (list, tuple)) and col[0] == nome[0]:
+                    apelido_var = col[1]
+                    unidade_var = col[2]
+                    break
+            
+            # Formata o nome da variável para exibição
+            nome_display = apelido_var.replace('\\', '')  # Remove barras invertidas
+            nome_display = nome_display.replace('{', '')  # Remove chaves
+            nome_display = nome_display.replace('}', '')
+            nome_display = nome_display.replace('\\,', '')  # Remove espaços LaTeX
+            nome_display = nome_display.replace('\\frac', '')  # Remove frações
+            nome_display = nome_display.replace('$', '')  # Remove símbolos de dólar
+            nome_display = nome_display.replace('|', '')  # Remove barras verticais
+            
+            # Adiciona a unidade se existir
+            if unidade_var:
+                nome_display = f"{nome_display} {unidade_var}"
+            
+            header.append(f"{nome_display}: {media:.6f} | {desvio:.6f} | {uA:.6f}")
+        
+        # Adiciona as estatísticas do alpha na janela
+        if 'Alpha' in df.columns:
+            alpha_janela = df['Alpha'].iloc[start_idx:end_idx]
+            media_alpha = alpha_janela.mean()
+            desvio_alpha = alpha_janela.std(ddof=1)
+            uA_alpha = desvio_alpha / np.sqrt(len(alpha_janela))
+            header.append(f"alpha: {media_alpha:.6f} | {desvio_alpha:.6f} | {uA_alpha:.6f}")
+        
+        # Adiciona as estatísticas do dP_F para cada sensor PDT
+        for col in colunas_analise_filtradas:
+            if isinstance(col, (list, tuple)) and col[0].startswith('PDT'):
+                dP_F_col = f'dP_F/dz {col[0]}'
+                if dP_F_col in df.columns:
+                    dP_F_janela = df[dP_F_col].iloc[start_idx:end_idx]
+                    media_dP_F = dP_F_janela.mean()
+                    desvio_dP_F = dP_F_janela.std(ddof=1)
+                    uA_dP_F = desvio_dP_F / np.sqrt(len(dP_F_janela))
+                    header.append(f"dP_F/dz {col[0]} [Pa/m]: {media_dP_F:.6f} | {desvio_dP_F:.6f} | {uA_dP_F:.6f}")
     
     header += [
         "***Dados da Janela***",
@@ -282,13 +339,54 @@ def save_results(df, coluna_escolhida, start_idx, end_idx, min_std, media_janela
     # Seleciona os dados da janela para todas as colunas
     window_data = df.iloc[start_idx:end_idx]
     
+    # Calcula as médias de todas as colunas na janela
+    medias_janela = window_data.mean()
+    
     # Salva o arquivo
     with open(output_file, 'w', encoding='utf-8') as f:
         # Escreve o cabeçalho
         f.write('\n'.join(header))
         f.write('\n')
         
-        # Escreve os nomes das colunas
+        # Escreve a seção de médias
+        f.write('***Resumo Medias***\n')
+        # Escreve os nomes das colunas, corrigindo os nomes dos gradientes e reorganizando
+        colunas_corrigidas = []
+        coluna_gravitacional = None
+        
+        for col in df.columns:
+            if col.startswith('dP_F/dz dP_dz_total_'):
+                colunas_corrigidas.append(col.replace('dP_F/dz dP_dz_total_', 'dP_dz_total_'))
+            elif col.startswith('dP_F/dz dP_dz_gravitacional'):
+                coluna_gravitacional = 'dP_dz_gravitacional'
+            else:
+                colunas_corrigidas.append(col)
+        
+        # Adiciona a coluna gravitacional por último
+        if coluna_gravitacional:
+            colunas_corrigidas.append(coluna_gravitacional)
+        
+        f.write('\t'.join(colunas_corrigidas))
+        f.write('\n')
+        
+        # Reorganiza as médias na mesma ordem das colunas corrigidas
+        medias_corrigidas = []
+        for col in colunas_corrigidas:
+            if col == 'dP_dz_gravitacional':
+                medias_corrigidas.append(medias_janela['dP_F/dz dP_dz_gravitacional'])
+            elif col.startswith('dP_dz_total_'):
+                col_original = 'dP_F/dz dP_dz_total_' + col.replace('dP_dz_total_', '')
+                medias_corrigidas.append(medias_janela[col_original])
+            else:
+                medias_corrigidas.append(medias_janela[col])
+        
+        # Escreve as médias
+        f.write('\t'.join([f"{val:.6f}" if isinstance(val, (int, float)) else str(val) 
+                         for val in medias_corrigidas]))
+        f.write('\n\n')
+        
+        f.write('***Serie Temporal Janelada***\n')
+        # Escreve os dados
         f.write('\t'.join(df.columns))
         f.write('\n')
         
@@ -330,7 +428,10 @@ def plot_time_series(df, colunas, output_dir, base_name):
             ax.plot(df['X_Value'], y_data, 'b-', alpha=0.8)
         # Linha da média da série completa
         media_serie = y_data.mean()
+        desvio_serie = y_data.std()
         ax.axhline(y=media_serie, color='g', linestyle='--', label=f'Mean: {media_serie:.4f}')
+        ax.axhline(y=media_serie + desvio_serie, color='r', linestyle=':', label=f'std: ±{desvio_serie:.4f}')
+        ax.axhline(y=media_serie - desvio_serie, color='r', linestyle=':')
         ax.legend(fontsize=8, loc='upper right')
         if linha == n_linhas - 1:
             ax.set_xlabel('Time (s)', fontsize=11)
@@ -340,9 +441,20 @@ def plot_time_series(df, colunas, output_dir, base_name):
         # Ajuste automático do eixo y com margem de 10%
         y_min = y_data.min()
         y_max = y_data.max()
-        # margem = 0.40 * (y_max - y_min) if y_max != y_min else 1
         margem_max = 1.01*y_max
         margem_min = 0.99*y_min
+        # if nome_coluna == 'Alpha':
+        #     margem_max = 1
+        #     margem_min = 0
+        # if 'J' in nome_coluna:
+        #     margem_max = media_serie*1.5
+        #     margem_min = media_serie*0.5
+        # if 'FT' in nome_coluna:
+        #     margem_max = media_serie*1.5
+        #     margem_min = media_serie*0.5
+        # if 'TIT' in nome_coluna:
+        #     margem_max = 1.05*y_max
+        #     margem_min = 0.95*y_min
         ax.set_ylim(margem_min, margem_max)
     for idx in range(len(colunas), n_linhas * n_colunas):
         linha = idx // n_colunas
@@ -371,14 +483,20 @@ def plot_windows(df, colunas, start_idx, end_idx, best_window_size, output_dir, 
         nome_coluna = coluna  # coluna já é o nome real da coluna
         if nome_coluna.startswith('PDT-'):
             y_data = np.abs(df[nome_coluna].iloc[start_idx:end_idx])
+            y_data_full = np.abs(df[nome_coluna])
             ax.plot(df['X_Value'], np.abs(df[nome_coluna]), 'b-', alpha=0.3, label='Full Series (abs)')
             ax.plot(df['X_Value'].iloc[start_idx:end_idx], y_data, 'r-', alpha=0.8, label=f'Window = {best_window_size:.0f} s')
         else:
             y_data = df[nome_coluna].iloc[start_idx:end_idx]
+            y_data_full = df[nome_coluna]
             ax.plot(df['X_Value'], df[nome_coluna], 'b-', alpha=0.3, label='Full Series')
             ax.plot(df['X_Value'].iloc[start_idx:end_idx], y_data, 'r-', alpha=0.8, label=f'Window = {best_window_size:.0f} s')
         media_janela = y_data.mean()
+        media_serie = np.mean(df[nome_coluna])
+        desvio_janela = y_data.std()
         ax.axhline(y=media_janela, color='g', linestyle='--', label=f'Mean: {media_janela:.4f}')
+        ax.axhline(y=media_janela + desvio_janela, color='r', linestyle=':', label=f'std: ±{desvio_janela:.4f}')
+        ax.axhline(y=media_janela - desvio_janela, color='r', linestyle=':')
         ax.legend(fontsize=8, loc='upper right')
         if linha == n_linhas - 1:
             ax.set_xlabel('Time (s)', fontsize=11)
@@ -386,10 +504,24 @@ def plot_windows(df, colunas, start_idx, end_idx, best_window_size, output_dir, 
         ax.grid(True, alpha=0.3)
         ax.tick_params(axis='both', which='major', labelsize=9)
         # Ajuste automático do eixo y com margem de 40% (igual ao plot_time_series)
-        y_min = y_data.min()
-        y_max = y_data.max()
+        # y_min = y_data.min()
+        # y_max = y_data.max()
+        y_min = y_data_full.min()
+        y_max = y_data_full.max()
         margem_max = 1.01*y_max
         margem_min = 0.99*y_min
+        # if nome_coluna == 'Alpha':
+        #     margem_max = 1
+        #     margem_min = 0
+        # if 'J' in nome_coluna:
+        #     margem_max = media_serie*1.5
+        #     margem_min = media_serie*0.5
+        # if 'FT' in nome_coluna:
+        #     margem_max = media_serie*1.5
+        #     margem_min = media_serie*0.5
+        # if 'TIT' in nome_coluna:
+        #     margem_max = 1.05*y_max
+        #     margem_min = 0.95*y_min
         ax.set_ylim(margem_min, margem_max)
     for idx in range(len(colunas), n_linhas * n_colunas):
         linha = idx // n_colunas
@@ -496,30 +628,41 @@ def calc_frictional_pressure_gradient(df, colunas, start_idx, end_idx, best_wind
         theta_rad = np.deg2rad(theta) # Converte theta para radianos
         # Calcula a série temporal dP_F usando a fórmula fornecida e a série alpha_series
         delta_p_prime = df[coluna_pdt_nome].iloc[start_idx:end_idx]
-        print(coluna_pdt_nome)
+
         if coluna_pdt_nome == sensor_Yokogawa:
-            print('passou aqui')
             rho_tubbing = rho_s
         else:
             rho_tubbing = rho_agua
         
         termo_gravitacional = ((1-alpha_series)*rho_agua + alpha_series*rho_ar - rho_tubbing) * g * np.sin(theta_rad)   # Pa/m
-        print('TERMO GRAVITACIONAL:',np.mean(termo_gravitacional))
-        print('GRADIENTE DE PRESSÃO:',np.mean(delta_p_prime / L))
         
-        if direction == 'Upward':
+        dP_dz_gravitacional = ((1-alpha_series)*rho_agua + alpha_series*rho_ar) * g * np.sin(theta_rad)   # Pa/m
+        
+        if direction in ['Upward', 'Horizontal']:
+            print('Direção do escoamento: UPWARD')
             dP_F_over_dz_series = (delta_p_prime / L) - termo_gravitacional                 # Calcula o gradiente de pressão friccional
+            # Calcula o RMS do sinal dP_F_over_dz_series
+            dP_F_over_dz_RMS = np.sqrt(np.mean(np.square(dP_F_over_dz_series)))
+            # Calcula o dP_dz_total usando o RMS
+            dP_dz_total = dP_F_over_dz_RMS + np.mean(dP_dz_gravitacional) # Calcula o gradiente de pressão Total
         elif direction == 'Downward':
-            print('Estamos em Downward')
-            dP_F_over_dz_series = -(delta_p_prime / L) + termo_gravitacional                            # Calcula o gradiente de pressão friccional
+            print('Direção do escoamento: DOWNWARD')
+            dP_F_over_dz_series = -(delta_p_prime / L) + termo_gravitacional 
+            # Calcula o RMS do sinal dP_F_over_dz_series
+            dP_F_over_dz_RMS = np.sqrt(np.mean(np.square(dP_F_over_dz_series)))
+            # Calcula o dP_dz_total usando o RMS
+            dP_dz_total = -(dP_F_over_dz_RMS) + np.mean(dP_dz_gravitacional) # Calcula o gradiente de pressão Total
         
         # Armazena a série calculada no DataFrame dP_F_df com o nome da coluna original
         dP_F_df[coluna_pdt_nome] = dP_F_over_dz_series
-        print('GRADIENTE FRICCIONAL: ', np.mean(dP_F_over_dz_series))
+        # Armazena também o dP_dz_total
+        dP_F_df[f'dP_dz_total_{coluna_pdt_nome}'] = dP_dz_total
+        # Armazena o dP_dz_gravitacional (apenas na primeira iteração)
+        if i == indices_pdt[0]:
+            dP_F_df['dP_dz_gravitacional'] = dP_dz_gravitacional
 
     # Agora dP_F_df contém as séries temporais de dP_F/dz para cada coluna PDT
     print("\nDataFrame dP_F_df criado com as séries temporais de gradiente de pressão friccional para colunas PDT.")
-    # print(dP_F_df.head()) # Opcional: mostrar as primeiras linhas do DataFrame
 
     return dP_F_df # Retorna o DataFrame
 
@@ -617,9 +760,6 @@ if __name__ == "__main__":
     print("\nColunas disponíveis para análise:")
     for i, col in enumerate(colunas_analise_filtradas, 1):
         print(f"{i}. {col}")
-    
-    # Não é mais necessário perguntar ao usuário a variável de critério
-    coluna_escolhida = variavel_criterio
 
     # Pergunta ao usuário o tipo de janela desejada
     print("\nComo deseja definir a janela de análise?")
@@ -646,6 +786,8 @@ if __name__ == "__main__":
         # Encontrar os índices correspondentes
         start_idx = df[df['X_Value'] >= tempo_inicial].index[0]
         end_idx = df[df['X_Value'] <= tempo_final].index[-1] + 1  # +1 para incluir o último ponto
+        # Para janela manual, usamos a primeira coluna como critério apenas para cálculo do desvio padrão
+        coluna_escolhida = colunas_analise_filtradas[0][0]
         min_std = df[coluna_escolhida].iloc[start_idx:end_idx].std()
         best_window_size = df['X_Value'].iloc[end_idx-1] - df['X_Value'].iloc[start_idx]
         media_janela = df[coluna_escolhida].iloc[start_idx:end_idx].mean()
@@ -704,7 +846,8 @@ if __name__ == "__main__":
     save_results(df, coluna_escolhida, start_idx, end_idx, min_std, media_janela,
                 min_window_size, max_window_size, best_window_size, file_path, data_teste,
                 fluid_1, fluid_2, direction, theta, ID,
-                nomes=colunas_analise_filtradas, medias=medias, desvios=desvios, uAs=uAs)
+                nomes=colunas_analise_filtradas, medias=medias, desvios=desvios, uAs=uAs,
+                escolha_janela=escolha_janela)
     
     # Plota o gráfico da variável critério e salva a imagem
     print(f"\nPlotando a variável critério ({coluna_escolhida}) e a janela...")
@@ -728,20 +871,6 @@ if __name__ == "__main__":
             apelido_escolhido = col[1]
             unidade_escolhida = col[2]
             break
-    plt.xlabel('Time (s)', fontsize=12)
-    plt.ylabel(f"${apelido_escolhido}$ {unidade_escolhida}", fontsize=12)
-    plt.title(f"Time Series of ${apelido_escolhido}$", fontsize=14)
-    plt.grid(True, alpha=0.3)
-    plt.legend(fontsize=10)
-    plt.xlim(df['X_Value'].min(), df['X_Value'].max())
-    y_min = df[coluna_escolhida].min() * 0.95
-    y_max = df[coluna_escolhida].max() * 1.05
-    plt.ylim(y_min, y_max)
-    plt.tight_layout()
-    output_path_criterion = os.path.join(output_dir, f"{coluna_escolhida}_{base_name}_janela.png")
-    plt.savefig(output_path_criterion)
-    print(f"Gráfico da variável critério salvo em: {output_path_criterion}")
-    plt.close(plt.gcf())
     
     # Plota as janelas de todas as variáveis e salva a imagem
     print("\nVisualizando as janelas de todas as variáveis...")
@@ -756,6 +885,8 @@ if __name__ == "__main__":
         plt.figure(figsize=(15, 8))
         # Linha da média de alpha
         media_alpha = alpha_df['Alpha'].mean()
+        # Fixa o range do eixo y entre 0 e 1
+        # plt.ylim(0, 1)
         plt.axhline(y=media_alpha, color='g', linestyle='--', label=f'Mean: {media_alpha:.4f}')
         plt.plot(alpha_df['X_Value'], alpha_df['Alpha'], label='Alpha')
         plt.xlabel('Time (s)', fontsize=12)
@@ -781,17 +912,69 @@ if __name__ == "__main__":
     # Plota as séries temporais de dP_F_df em um único gráfico
     if dP_F_df is not None and not dP_F_df.empty:
         plt.figure(figsize=(15, 8))
+        
+        # Plota o dP_dz_gravitacional
+        grav_series = dP_F_df['dP_dz_gravitacional']
+        grav_mean = grav_series.mean()
+        grav_std = grav_series.std()
+        plt.plot(df['X_Value'].iloc[start_idx:end_idx], grav_series, 
+                label=f'dP/dz gravitacional\nvalue: {grav_mean:.2f} ± {grav_std:.2f}', 
+                color='black', linestyle='--')
+        
+        # Plota as séries de dP_F para cada sensor
         for col in dP_F_df.columns:
-            # Usa o X_Value original do DataFrame principal para o eixo x
-            plt.plot(df['X_Value'].iloc[start_idx:end_idx], dP_F_df[col], label=col)
+            if not col.startswith('dP_dz_total') and col != 'dP_dz_gravitacional':  # Plota apenas as séries de dP_F
+                # Formata o label baseado no tipo de sensor
+                if col == sensor_Yokogawa:
+                    sensor_range = col.split('-')[3]  # Pega o range após o terceiro hífen
+                    label_base = f'Yokogawa {sensor_range}'
+                elif col == sensor_Endress:
+                    sensor_range = col.split('-')[3]  # Pega o range após o terceiro hífen
+                    label_base = f'Endress {sensor_range}'
+                else:
+                    label_base = col
+                
+                # Calcula média e desvio padrão
+                series = dP_F_df[col]
+                mean = series.mean()
+                std = series.std()
+                
+                plt.plot(df['X_Value'].iloc[start_idx:end_idx], series, 
+                        label=f'dP_F/dz {label_base}\nvalue: {mean:.2f} ± {std:.2f}', 
+                        alpha=0.7)
+        
+        # Plota as séries de dP_dz_total para cada sensor
+        for col in dP_F_df.columns:
+            if col.startswith('dP_dz_total'):  # Plota apenas as séries de dP_dz_total
+                # Extrai o nome do sensor original
+                sensor_name = col.replace('dP_dz_total_', '')
+                # Formata o label baseado no tipo de sensor
+                if sensor_name == sensor_Yokogawa:
+                    sensor_range = sensor_name.split('-')[3]  # Pega o range após o terceiro hífen
+                    label_base = f'Yokogawa {sensor_range}'
+                elif sensor_name == sensor_Endress:
+                    sensor_range = sensor_name.split('-')[3]  # Pega o range após o terceiro hífen
+                    label_base = f'Endress {sensor_range}'
+                else:
+                    label_base = sensor_name
+                
+                # Calcula média e desvio padrão
+                series = abs(dP_F_df[col])
+                mean = series.mean()
+                std = series.std()
+                
+                plt.plot(df['X_Value'].iloc[start_idx:end_idx], series, 
+                        label=f'dP/dz total {label_base}\nvalue: {mean:.2f} ± {std:.2f}', 
+                        linestyle=':', linewidth=2)
+        
         plt.xlabel('Time (s)', fontsize=12)
-        plt.ylabel(r'$ \frac{\Delta P_{f}}{L}$ [Pa/m]', fontsize=12)
-        plt.title(r'Frictional Pressure Gradient $\frac{\Delta P_{f}}{L}$', fontsize=14)
+        plt.ylabel(r'$ \frac{\Delta P}{L}$ [Pa/m]', fontsize=12)
+        plt.title(r'Pressure Gradients', fontsize=14)
         plt.grid(True, alpha=0.3)
-        plt.legend(fontsize=10)
+        plt.legend(fontsize=10, bbox_to_anchor=(1.05, 1), loc='upper left')
         plt.tight_layout()
         output_path_dpf = os.path.join(output_dir, f"dP_F_dz-{base_name}.png")
-        plt.savefig(output_path_dpf)
+        plt.savefig(output_path_dpf, bbox_inches='tight')
         print(f"Gráfico dP_F/dz salvo em: {output_path_dpf}")
         plt.close(plt.gcf()) # Fecha a figura atual
     else:
