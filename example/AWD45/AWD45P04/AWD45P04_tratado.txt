@@ -7,6 +7,8 @@ Fluido 1: Air
 Fluido 2: Water
 Direção do escoamento: Downward
 Inclinação (theta): 45°
+Intensidadedo gas densitometro (Ig): 252883
+Intensidadedo fluido densitometro (If): 151287
 ***Janela Manual***
 Tamanho da Janela: 300.0 segundos
 Tempo Inicial: 0.00 segundos

@@ -259,6 +259,8 @@ def save_results(df, coluna_escolhida, start_idx, end_idx, min_std, media_janela
         f"Fluido 2: {fluid_2}",
         f"Direção do escoamento: {direction}",
         f"Inclinação (theta): {theta}°",
+        f"Intensidadedo gas densitometro (Ig): {I_g}",
+        f"Intensidadedo fluido densitometro (If): {I_f}",
     ]
     
     # Adiciona informações específicas baseado no tipo de janela
