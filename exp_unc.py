@@ -5,13 +5,18 @@ import matplotlib.pyplot as plt
 import os
 from datetime import datetime
 from CoolProp.CoolProp import PropsSI
+import sys
 
 ####################################################################################################################################################
 #                                            INPUTS
 ####################################################################################################################################################
-file_path = 'example/AWD45/AWD45P15/AWD45P15' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
+file_path = 'example/AWD45/AWD45P04/AWD45P04' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
 
-L = 1.7         # m comprimento entre as tomadas de diferencial de pressão
+L = 1.70         # m comprimento entre as tomadas de diferencial de pressão
+
+# Valores de calibração do densitômetro IMPORTANTE
+I_g = 252883                     # Insira a intensidade padrão para o gás (Calibração do densitômetro)
+I_f = 151287                      # Insira a intensidade padrão para o líquido (Calibração do densitômetro)
 
 sensor_Yokogawa = 'PDT-M-0101D-30Kpa_mA'
 sensor_Endress = 'PDT-M-0101-40kPa_mA'
@@ -19,8 +24,8 @@ sensor_Endress = 'PDT-M-0101-40kPa_mA'
 ### Colunas de interesse -> Insira o nome das colunas a plotar e avaliar do arquivo .dat
 # Lista de colunas para análise: [nome_coluna, apelido, unidade]
 colunas_analise = [
-    [sensor_Endress, r'|\Delta P_{40\,kPa}|', r'[Pa]'],
-    [sensor_Yokogawa, r'|\Delta P_{30\,kPa}|', r'[Pa]'],
+    [sensor_Yokogawa, r'\Delta P_{40\,kPa} / L', r'[Pa/m]'],
+    [sensor_Endress, r'\Delta P_{30\,kPa} / L', r'[Pa/m]'],
     ['Alpha', r'\alpha', r''],
     ['J Agua', r'J_{water}', r'[m/s]'],
     ['J Ar corrigido', r'J_{air}', r'[m/s]'],
@@ -30,9 +35,6 @@ colunas_analise = [
     ['rho_g', r'\rho_{air}', r'[kg/m³]']
 ]
 
-# Valores de calibração do densitômetro
-I_g = 252883                     # Insira a intensidade padrão para o gás (Calibração do densitômetro)
-I_f = 151287                      # Insira a intensidade padrão para o líquido (Calibração do densitômetro)
 ####################################################################################################################################################
 #       '                                   END INPUTS
 ####################################################################################################################################################
@@ -421,7 +423,8 @@ def plot_time_series(df, colunas, output_dir, base_name):
         ax = axs[linha, col] if n_linhas > 1 else axs[col]
         # Se for série PDT, plota o valor absoluto
         if nome_coluna.startswith('PDT-'):
-            y_data = np.abs(df[nome_coluna])
+            y_data = df[nome_coluna]/L
+            rms_pdt = np.sqrt(np.mean(np.square(y_data)))
             ax.plot(df['X_Value'], y_data, 'b-', alpha=0.8)
         else:
             y_data = df[nome_coluna]
@@ -429,8 +432,35 @@ def plot_time_series(df, colunas, output_dir, base_name):
         # Linha da média da série completa
         media_serie = y_data.mean()
         desvio_serie = y_data.std()
+         # Ajuste automático do eixo y com margem de 1%
+        y_min = y_data.min()
+        y_max = y_data.max()
+
+        if 'PDT' in nome_coluna:
+            # Se todos os valores são positivos
+            if y_min >= 0:
+                margem_min = y_min * 0.99  # 1% abaixo do mínimo
+                margem_max = y_max * 1.01  # 1% acima do máximo
+            # Se todos os valores são negativos
+            elif y_max <= 0:
+                margem_min = y_min * 1.01  # 1% acima do mínimo (menos negativo)
+                margem_max = y_max * 0.99  # 1% abaixo do máximo (mais próximo de zero)
+            # Se os valores oscilam em torno de zero
+            else:
+                max_abs = max(abs(y_min), abs(y_max))
+                margem_min = -max_abs * 1.01 # 1% abaixo do maior valor absoluto
+                margem_max = max_abs * 1.01  # 1% acima do maior valor absoluto
+        else:
+            # Margem padrão de 1% para outras colunas (se não houver lógica específica)
+            margem_min = y_min * 0.99
+            margem_max = y_max * 1.01
+            
+        ax.set_ylim(margem_min, margem_max)
+        
         ax.axhline(y=media_serie, color='g', linestyle='--', label=f'Mean: {media_serie:.4f}')
         ax.axhline(y=media_serie + desvio_serie, color='r', linestyle=':', label=f'std: ±{desvio_serie:.4f}')
+        if nome_coluna.startswith('PDT-') and (y_min/abs(y_min)) != (y_max/abs(y_max)):
+            ax.axhline(y=rms_pdt, color='g', linestyle='-.', label=f'RMS: {rms_pdt:.4f}')
         ax.axhline(y=media_serie - desvio_serie, color='r', linestyle=':')
         ax.legend(fontsize=8, loc='upper right')
         if linha == n_linhas - 1:
@@ -438,24 +468,9 @@ def plot_time_series(df, colunas, output_dir, base_name):
         ax.set_ylabel(f"${apelido}$ {unidade}", fontsize=11)
         ax.grid(True, alpha=0.3)
         ax.tick_params(axis='both', which='major', labelsize=9)
-        # Ajuste automático do eixo y com margem de 10%
-        y_min = y_data.min()
-        y_max = y_data.max()
-        margem_max = 1.01*y_max
-        margem_min = 0.99*y_min
-        # if nome_coluna == 'Alpha':
-        #     margem_max = 1
-        #     margem_min = 0
-        # if 'J' in nome_coluna:
-        #     margem_max = media_serie*1.5
-        #     margem_min = media_serie*0.5
-        # if 'FT' in nome_coluna:
-        #     margem_max = media_serie*1.5
-        #     margem_min = media_serie*0.5
-        # if 'TIT' in nome_coluna:
-        #     margem_max = 1.05*y_max
-        #     margem_min = 0.95*y_min
-        ax.set_ylim(margem_min, margem_max)
+       
+        
+        
     for idx in range(len(colunas), n_linhas * n_colunas):
         linha = idx // n_colunas
         col = idx % n_colunas
@@ -482,9 +497,10 @@ def plot_windows(df, colunas, start_idx, end_idx, best_window_size, output_dir, 
         # Se for série PDT, plota o valor absoluto
         nome_coluna = coluna  # coluna já é o nome real da coluna
         if nome_coluna.startswith('PDT-'):
-            y_data = np.abs(df[nome_coluna].iloc[start_idx:end_idx])
-            y_data_full = np.abs(df[nome_coluna])
-            ax.plot(df['X_Value'], np.abs(df[nome_coluna]), 'b-', alpha=0.3, label='Full Series (abs)')
+            y_data = (df[nome_coluna].iloc[start_idx:end_idx])/L
+            y_data_full = (df[nome_coluna])/L
+            rms_pdt_win = np.sqrt(np.mean(np.square(y_data)))
+            ax.plot(df['X_Value'], y_data_full, 'b-', alpha=0.3, label='Full Series (abs)')
             ax.plot(df['X_Value'].iloc[start_idx:end_idx], y_data, 'r-', alpha=0.8, label=f'Window = {best_window_size:.0f} s')
         else:
             y_data = df[nome_coluna].iloc[start_idx:end_idx]
@@ -494,8 +510,36 @@ def plot_windows(df, colunas, start_idx, end_idx, best_window_size, output_dir, 
         media_janela = y_data.mean()
         media_serie = np.mean(df[nome_coluna])
         desvio_janela = y_data.std()
+        
+        # Ajuste automático do eixo y com margem de 1% para a série completa
+        y_min = y_data_full.min()
+        y_max = y_data_full.max()
+        
+        if 'PDT' in nome_coluna:
+            # Se todos os valores são positivos
+            if y_min >= 0:
+                margem_min = y_min * 0.99  # 1% abaixo do mínimo
+                margem_max = y_max * 1.01  # 1% acima do máximo
+            # Se todos os valores são negativos
+            elif y_max <= 0:
+                margem_min = y_min * 1.01  # 1% acima do mínimo (menos negativo)
+                margem_max = y_max * 0.99  # 1% abaixo do máximo (mais próximo de zero)
+            # Se os valores oscilam em torno de zero
+            else:
+                max_abs = max(abs(y_min), abs(y_max))
+                margem_min = -max_abs * 1.01 # 1% abaixo do maior valor absoluto
+                margem_max = max_abs * 1.01  # 1% acima do maior valor absoluto
+        else:
+            # Margem padrão de 1% para outras colunas (se não houver lógica específica)
+            margem_min = y_min * 0.99
+            margem_max = y_max * 1.01
+
+        ax.set_ylim(margem_min, margem_max)
+        
         ax.axhline(y=media_janela, color='g', linestyle='--', label=f'Mean: {media_janela:.4f}')
         ax.axhline(y=media_janela + desvio_janela, color='r', linestyle=':', label=f'std: ±{desvio_janela:.4f}')
+        if nome_coluna.startswith('PDT-') and (y_min/abs(y_min)) != (y_max/abs(y_max)):
+            ax.axhline(y=rms_pdt_win, color='g', linestyle='-.', label=f'RMS: {rms_pdt_win:.4f}')
         ax.axhline(y=media_janela - desvio_janela, color='r', linestyle=':')
         ax.legend(fontsize=8, loc='upper right')
         if linha == n_linhas - 1:
@@ -503,26 +547,7 @@ def plot_windows(df, colunas, start_idx, end_idx, best_window_size, output_dir, 
         ax.set_ylabel(f"${apelido}$ {unidade}", fontsize=11)
         ax.grid(True, alpha=0.3)
         ax.tick_params(axis='both', which='major', labelsize=9)
-        # Ajuste automático do eixo y com margem de 40% (igual ao plot_time_series)
-        # y_min = y_data.min()
-        # y_max = y_data.max()
-        y_min = y_data_full.min()
-        y_max = y_data_full.max()
-        margem_max = 1.01*y_max
-        margem_min = 0.99*y_min
-        # if nome_coluna == 'Alpha':
-        #     margem_max = 1
-        #     margem_min = 0
-        # if 'J' in nome_coluna:
-        #     margem_max = media_serie*1.5
-        #     margem_min = media_serie*0.5
-        # if 'FT' in nome_coluna:
-        #     margem_max = media_serie*1.5
-        #     margem_min = media_serie*0.5
-        # if 'TIT' in nome_coluna:
-        #     margem_max = 1.05*y_max
-        #     margem_min = 0.95*y_min
-        ax.set_ylim(margem_min, margem_max)
+        
     for idx in range(len(colunas), n_linhas * n_colunas):
         linha = idx // n_colunas
         col = idx % n_colunas
@@ -637,21 +662,25 @@ def calc_frictional_pressure_gradient(df, colunas, start_idx, end_idx, best_wind
         termo_gravitacional = ((1-alpha_series)*rho_agua + alpha_series*rho_ar - rho_tubbing) * g * np.sin(theta_rad)   # Pa/m
         
         dP_dz_gravitacional = ((1-alpha_series)*rho_agua + alpha_series*rho_ar) * g * np.sin(theta_rad)   # Pa/m
-        
+
+        print('Direção do escoamento:', direction)
+
         if direction in ['Upward', 'Horizontal']:
-            print('Direção do escoamento: UPWARD')
             dP_F_over_dz_series = (delta_p_prime / L) - termo_gravitacional                 # Calcula o gradiente de pressão friccional
             # Calcula o RMS do sinal dP_F_over_dz_series
             dP_F_over_dz_RMS = np.sqrt(np.mean(np.square(dP_F_over_dz_series)))
             # Calcula o dP_dz_total usando o RMS
             dP_dz_total = dP_F_over_dz_RMS + np.mean(dP_dz_gravitacional) # Calcula o gradiente de pressão Total
         elif direction == 'Downward':
-            print('Direção do escoamento: DOWNWARD')
             dP_F_over_dz_series = -(delta_p_prime / L) + termo_gravitacional 
             # Calcula o RMS do sinal dP_F_over_dz_series
+            dP_F_over_dz_series_mean = np.mean(dP_F_over_dz_series)
             dP_F_over_dz_RMS = np.sqrt(np.mean(np.square(dP_F_over_dz_series)))
+
             # Calcula o dP_dz_total usando o RMS
             dP_dz_total = -(dP_F_over_dz_RMS) + np.mean(dP_dz_gravitacional) # Calcula o gradiente de pressão Total
+            dP_dz_total_mean = -np.mean(dP_F_over_dz_series) + np.mean(dP_dz_gravitacional)
+            
         
         # Armazena a série calculada no DataFrame dP_F_df com o nome da coluna original
         dP_F_df[coluna_pdt_nome] = dP_F_over_dz_series
@@ -700,6 +729,35 @@ def extract_info_from_filename(filename):
     
     return fluid_1, fluid_2, direction, theta, ID
 
+def check_required_columns(df, colunas_analise):
+    """
+    Verifica se as colunas necessárias existem no DataFrame.
+    Retorna True se todas existirem, False caso contrário.
+    """
+    colunas_faltantes = []
+    
+    # Lista de colunas que são calculadas internamente
+    colunas_calculadas = ['Alpha', 'rho_g', 'J Ar corrigido']
+    
+    # Verifica cada coluna do array colunas_analise
+    for coluna_info in colunas_analise:
+        nome_coluna = coluna_info[0]
+        # Pula as colunas que são calculadas internamente
+        if nome_coluna in colunas_calculadas:
+            continue
+        # Verifica se a coluna existe no DataFrame
+        if nome_coluna not in df.columns:
+            colunas_faltantes.append(nome_coluna)
+    
+    if colunas_faltantes:
+        print("\nERRO: As seguintes colunas não foram encontradas no arquivo:")
+        for coluna in colunas_faltantes:
+            print(f"- {coluna}")
+        print("\nPor favor, verifique se o arquivo de entrada está correto.")
+        return False
+    
+    return True
+
 # Exemplo de uso:
 if __name__ == "__main__":
     
@@ -708,6 +766,10 @@ if __name__ == "__main__":
     print("Dimensões do DataFrame:", df.shape)
     print("\nNomes das colunas:")
     print(df.columns.tolist())
+    
+    # Verifica se as colunas necessárias existem
+    if not check_required_columns(df, colunas_analise):
+        sys.exit(1)
     
     # Extrai informações do nome do arquivo
     fluid_1, fluid_2, direction, theta, ID = extract_info_from_filename(file_path)
@@ -918,7 +980,7 @@ if __name__ == "__main__":
         grav_mean = grav_series.mean()
         grav_std = grav_series.std()
         plt.plot(df['X_Value'].iloc[start_idx:end_idx], grav_series, 
-                label=f'dP/dz gravitacional\nvalue: {grav_mean:.2f} ± {grav_std:.2f}', 
+                label=f'dP/dz gravitacional\nmean: {grav_mean:.2f} ± {grav_std:.2f}', 
                 color='black', linestyle='--')
         
         # Plota as séries de dP_F para cada sensor
@@ -934,13 +996,12 @@ if __name__ == "__main__":
                 else:
                     label_base = col
                 
-                # Calcula média e desvio padrão
+                # Calcula RMS e desvio padrão
                 series = dP_F_df[col]
-                mean = series.mean()
-                std = series.std()
+                rms = np.sqrt(np.mean(np.square(series)))
                 
                 plt.plot(df['X_Value'].iloc[start_idx:end_idx], series, 
-                        label=f'dP_F/dz {label_base}\nvalue: {mean:.2f} ± {std:.2f}', 
+                        label=f'dP_F/dz {label_base}\nRMS: {rms:.2f}', 
                         alpha=0.7)
         
         # Plota as séries de dP_dz_total para cada sensor
@@ -957,14 +1018,13 @@ if __name__ == "__main__":
                     label_base = f'Endress {sensor_range}'
                 else:
                     label_base = sensor_name
+            
                 
-                # Calcula média e desvio padrão
+                # Calcula RMS e desvio padrão
                 series = abs(dP_F_df[col])
-                mean = series.mean()
-                std = series.std()
                 
                 plt.plot(df['X_Value'].iloc[start_idx:end_idx], series, 
-                        label=f'dP/dz total {label_base}\nvalue: {mean:.2f} ± {std:.2f}', 
+                        label=f'dP/dz total {label_base}\nValue: {np.mean(abs(series)):.2f}', 
                         linestyle=':', linewidth=2)
         
         plt.xlabel('Time (s)', fontsize=12)
