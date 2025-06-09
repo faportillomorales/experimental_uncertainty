@@ -33,7 +33,8 @@ def main():
         "pandas",
         "numpy",
         "matplotlib",
-        "CoolProp"
+        "CoolProp",
+        "openpyxl"
     ]
     
     # Instala cada pacote
@@ -51,7 +52,7 @@ def main():
     else:
         print("\n✗ Algumas dependências não puderam ser instaladas.")
         print("Por favor, tente instalar manualmente os pacotes que falharam:")
-        print("pip install uncertainties pandas numpy matplotlib CoolProp")
+        print("pip install uncertainties pandas numpy matplotlib CoolProp openpyxl")
     
     print("\nPressione Enter para sair...")
     input()
