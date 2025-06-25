@@ -12,44 +12,51 @@ import tempfile
 
 # Exemplo de função adaptada para Streamlit (as demais devem ser adaptadas de forma semelhante)
 def read_file(file_path: str):
-    with open(file_path, 'r') as f:
-        lines = f.readlines()
-    data_teste = None
-    primeiro_header_end = False
-    for line in lines:
-        if '***End_of_Header***' in line:
-            primeiro_header_end = True
-            continue
-        if not primeiro_header_end:
-            if 'Date' in line:
-                try:
-                    data = line.strip().split('Date')[1].strip()
-                    partes = data.split('/')
-                    if len(partes) == 3:
-                        data_teste = f"{partes[0]}/{partes[1]}/{partes[2]}"
-                except:
-                    pass
-    header_count = 0
-    header_end_idx = 0
-    for i, line in enumerate(lines):
-        if '***End_of_Header***' in line:
-            header_count += 1
-            if header_count == 2:
-                header_end_idx = i + 1
-                break
-    column_names = [name.strip() for name in lines[header_end_idx].strip().split('\t')]
-    df = pd.read_csv(file_path, 
-                     sep='\t',
-                     skiprows=header_end_idx+1,
-                     decimal=',',
-                     na_values=[''],
-                     encoding='utf-8',
-                     names=column_names)
-    if 'J Ar' in df.columns:
-        df['J Ar corrigido'] = df['J Ar'] * (1 - 0.06675)
-    if 'J Agua' in df.columns:
-        df['J Agua corrigido'] = df['J Agua'] * (1 - 0.06675)
-    return df, data_teste
+    try:
+        with open(file_path, 'r') as f:
+            lines = f.readlines()
+        data_teste = None
+        primeiro_header_end = False
+        for line in lines:
+            if '***End_of_Header***' in line:
+                primeiro_header_end = True
+                continue
+            if not primeiro_header_end:
+                if 'Date' in line:
+                    try:
+                        data = line.strip().split('Date')[1].strip()
+                        partes = data.split('/')
+                        if len(partes) == 3:
+                            data_teste = f"{partes[0]}/{partes[1]}/{partes[2]}"
+                    except:
+                        pass
+        header_count = 0
+        header_end_idx = 0
+        for i, line in enumerate(lines):
+            if '***End_of_Header***' in line:
+                header_count += 1
+                if header_count == 2:
+                    header_end_idx = i + 1
+                    break
+        if header_end_idx == 0:
+            st.error('Arquivo não possui dois cabeçalhos ***End_of_Header***. Formato inválido!')
+            return None, None
+        column_names = [name.strip() for name in lines[header_end_idx].strip().split('\t')]
+        df = pd.read_csv(file_path, 
+                         sep='\t',
+                         skiprows=header_end_idx+1,
+                         decimal=',',
+                         na_values=[''],
+                         encoding='utf-8',
+                         names=column_names)
+        if 'J Ar' in df.columns:
+            df['J Ar corrigido'] = df['J Ar'] * (1 - 0.06675)
+        if 'J Agua' in df.columns:
+            df['J Agua corrigido'] = df['J Agua'] * (1 - 0.06675)
+        return df, data_teste
+    except Exception as e:
+        st.error(f"Erro ao ler o arquivo: {e}\nVerifique se o arquivo está no formato correto do LEMI.")
+        return None, None
 
 def extract_info_from_filename(filename: str):
     fluid_map = {
@@ -159,6 +166,8 @@ if uploaded_file is not None:
         tmp_file.write(uploaded_file.read())
         temp_path = tmp_file.name
     df, data_teste = read_file(temp_path)
+    if df is None:
+        st.stop()
     st.success("Arquivo carregado com sucesso!")
     st.write(f"Data do teste experimental: {data_teste}")
     st.write(f"Dimensões do DataFrame: {df.shape}")
