@@ -386,7 +386,7 @@ def plot_time_series(df, colunas, output_dir, base_name):
         fig.delaxes(axs[linha, col])
     output_path = os.path.join(output_dir, f"series_full-{base_name}.png")
     plt.savefig(output_path)
-    plt.show()
+    # plt.show()
     plt.close(fig)
 
 def plot_windows(df, colunas, start_idx, end_idx, best_window_size, output_dir, base_name):
