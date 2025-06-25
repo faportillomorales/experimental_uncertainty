@@ -10,26 +10,26 @@ import sys
 ####################################################################################################################################################
 #                                            INPUTS
 ####################################################################################################################################################
-file_path = 'example/AWU90/AWU90P01/AWU90P01' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
+file_path = 'G:/Meu Drive/LEMI/dados/1. Validation Tests/VAWH00/VAWH00P12/Data/VAWH00P12' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
 
 L = 1.70         # m comprimento entre as tomadas de diferencial de pressão
 
 # Valores de calibração do densitômetro IMPORTANTE
-I_g = 252883                     # Insira a intensidade padrão para o gás (Calibração do densitômetro)
-I_f = 151287                      # Insira a intensidade padrão para o líquido (Calibração do densitômetro)
+I_g = 275191                     # Insira a intensidade padrão para o gás (Calibração do densitômetro)
+I_f = 164176                      # Insira a intensidade padrão para o líquido (Calibração do densitômetro)
 
-sensor_Yokogawa = 'PDT-M-0101D-30Kpa_mA'
+sensor_Yokogawa = 'PDT-M-0101C-10kPa_mA'
 sensor_Endress = 'PDT-M-0101-40kPa_mA'
 
 ### Colunas de interesse -> Insira o nome das colunas a plotar e avaliar do arquivo .dat
 # Lista de colunas para análise: [nome_coluna, apelido, unidade]
 colunas_analise = [
-    [sensor_Yokogawa, r'\Delta P_{40\,kPa} / L', r'[Pa/m]'],
-    [sensor_Endress, r'\Delta P_{30\,kPa} / L', r'[Pa/m]'],
+    ['PDT-M-0101-40kPa', r'\Delta P_{40\,kPa} / L', r'[Pa/m]'],
+    ['PDT-M-0101C-3kPa', r'\Delta P_{3\,kPa} / L', r'[Pa/m]'],
     ['Alpha', r'\alpha', r''],
     ['J Agua corrigido', r'J_{water}', r'[m/s]'],
     ['J Ar corrigido', r'J_{air}', r'[m/s]'],
-    ['FT-A-0302', r'Q_{air}', r'[m³/h]'],
+    ['FT-O-0301', r'Q_{air}', r'[m³/h]'],
     ['PIT-M-0101', r'Gauge\ Pressure', r'[Bar]'],
     ['TIT-M-0101', r'Temperature', r'[°C]'],
     ['rho_g', r'\rho_{air}', r'[kg/m³]']
@@ -202,7 +202,7 @@ def save_results(df: pd.DataFrame, coluna_escolhida: str, start_idx: int, end_id
     diretorio = os.path.dirname(file_path)
     base_name = os.path.splitext(os.path.basename(file_path))[0]
     
-    output_file = os.path.join(diretorio, f"{base_name}_tratado.xlsx")
+    output_file = os.path.join(diretorio, f"{base_name}_processed.xlsx")
     
     data_atual = datetime.now().strftime('%d/%m/%Y')
     
@@ -564,7 +564,8 @@ def calc_frictional_pressure_gradient(df, colunas, start_idx, end_idx, best_wind
 def extract_info_from_filename(filename: str):
     """
     Extrai informações do nome do arquivo experimental.
-    Formato esperado: XXX##ID## onde:
+    Se começar com 'V', desloca a leitura em uma casa (ponto de validação).
+    Formato esperado: [V]XXX##ID## onde:
     - X: letra indicando o fluido (A:Air, W:Water, O:Oil, S:SF6)
     - #: número indicando a inclinação em graus
     - ID: identificador do ponto experimental
@@ -576,22 +577,22 @@ def extract_info_from_filename(filename: str):
         'S': 'SF6',
         'D': 'Dense Fluid'
     }
-    
     direction_map = {
         'H': 'Horizontal',
         'U': 'Upward',
         'D': 'Downward'
     }
-    
     base_name = os.path.splitext(os.path.basename(filename))[0]
     
-    fluid_1 = fluid_map.get(base_name[0], 'Unknown')
-    fluid_2 = fluid_map.get(base_name[1], 'Unknown')
-    direction = direction_map.get(base_name[2], 'Unknown')
-    theta = int(base_name[3:5])
-    ID = base_name[5:]
+    offset = 1 if base_name[0] == 'V' else 0
+    is_validation = base_name[0] == 'V'
+    fluid_1 = fluid_map.get(base_name[0+offset], 'Unknown')
+    fluid_2 = fluid_map.get(base_name[1+offset], 'Unknown')
+    direction = direction_map.get(base_name[2+offset], 'Unknown')
+    theta = int(base_name[3+offset:5+offset])
+    ID = base_name[5+offset:]
     
-    return fluid_1, fluid_2, direction, theta, ID
+    return fluid_1, fluid_2, direction, theta, ID, is_validation
 
 def check_required_columns(df: pd.DataFrame, colunas_analise: list):
     """
@@ -730,7 +731,14 @@ if __name__ == "__main__":
     if not check_required_columns(df, colunas_analise):
         sys.exit(1)
 
-    fluid_1, fluid_2, direction, theta, ID = extract_info_from_filename(file_path)
+    fluid_1, fluid_2, direction, theta, ID, is_validation = extract_info_from_filename(file_path)
+    print(f"\nInformações extraídas do nome do arquivo:")
+    print(f"Fluido 1: {fluid_1}")
+    print(f"Fluido 2: {fluid_2}")
+    print(f"Direção: {direction}")
+    print(f"Inclinação (theta): {theta}°")
+    print(f"ID do ponto: {ID}")
+    print(f"Ponto de validação: {'Sim' if is_validation else 'Não'}")
 
     output_dir = os.path.dirname(file_path)
     base_name = os.path.splitext(os.path.basename(file_path))[0]
