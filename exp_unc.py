@@ -10,7 +10,7 @@ import sys
 ####################################################################################################################################################
 #                                            INPUTS
 ####################################################################################################################################################
-file_path = 'G:/Meu Drive/LEMI/dados/1. Validation Tests/VAWH00/VAWH00P12/Data/VAWH00P12' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
+file_path = 'example/AWD45/AWD45P01/AWD45P01' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
 
 L = 1.70         # m comprimento entre as tomadas de diferencial de pressão
 
