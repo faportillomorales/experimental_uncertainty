@@ -171,7 +171,7 @@ if uploaded_file is not None:
     st.success("Arquivo carregado com sucesso!")
     st.write(f"Data do teste experimental: {data_teste}")
     st.write(f"Dimensões do DataFrame: {df.shape}")
-    st.write("Colunas disponíveis:", list(df.columns))
+    # st.write("Colunas disponíveis:", list(df.columns))
     # Extração de informações do nome do arquivo
     fluid_1, fluid_2, direction, theta, ID, is_validation = extract_info_from_filename(uploaded_file.name)
     st.info(f"Fluido 1: {fluid_1}\nFluido 2: {fluid_2}\nDireção: {direction}\nInclinação: {theta}°\nID: {ID}\nPonto de validação: {'Sim' if is_validation else 'Não'}")
