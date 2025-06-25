@@ -159,7 +159,7 @@ st.set_page_config(page_title="Análise Experimental LEMI", layout="wide")
 st.title("Análise Experimental LEMI - exp_unc (GUI)")
 
 st.markdown("Faça upload do arquivo de dados (.dat ou .txt):")
-uploaded_file = st.file_uploader("Escolha o arquivo de dados", type=["dat", "txt", ""])
+uploaded_file = st.file_uploader("Escolha o arquivo de dados", type=["dat", "txt"])
 
 if uploaded_file is not None:
     with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
