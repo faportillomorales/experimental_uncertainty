@@ -10,7 +10,7 @@ import sys
 ####################################################################################################################################################
 #                                            INPUTS
 ####################################################################################################################################################
-file_path = 'G:/Meu Drive/LEMI/dados/1. Validation Tests/VAWH00/VAWH00P12/Data/VAWH00P12' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
+file_path = 'G:/Meu Drive/LEMI/uncertainties/example/AWD45/AWD45P01/AWD45P01' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
 
 L = 1.70         # m comprimento entre as tomadas de diferencial de pressão
 
@@ -18,14 +18,14 @@ L = 1.70         # m comprimento entre as tomadas de diferencial de pressão
 I_g = 275191                     # Insira a intensidade padrão para o gás (Calibração do densitômetro)
 I_f = 164176                      # Insira a intensidade padrão para o líquido (Calibração do densitômetro)
 
-sensor_Yokogawa = 'PDT-M-0101C-10kPa_mA'
+sensor_Yokogawa = 'PDT-M-0101D-30Kpa_mA'
 sensor_Endress = 'PDT-M-0101-40kPa_mA'
 
 ### Colunas de interesse -> Insira o nome das colunas a plotar e avaliar do arquivo .dat
 # Lista de colunas para análise: [nome_coluna, apelido, unidade]
 colunas_analise = [
-    ['PDT-M-0101-40kPa', r'\Delta P_{40\,kPa} / L', r'[Pa/m]'],
-    ['PDT-M-0101C-3kPa', r'\Delta P_{3\,kPa} / L', r'[Pa/m]'],
+    [sensor_Endress, r'\Delta P_{40\,kPa} / L', r'[Pa/m]'],
+    [sensor_Yokogawa, r'\Delta P_{30\,kPa} / L', r'[Pa/m]'],
     ['Alpha', r'\alpha', r''],
     ['J Agua corrigido', r'J_{water}', r'[m/s]'],
     ['J Ar corrigido', r'J_{air}', r'[m/s]'],
@@ -292,26 +292,46 @@ def save_results(df: pd.DataFrame, coluna_escolhida: str, start_idx: int, end_id
         else:
             medias_corrigidas.append(medias_janela[col])
     
-    resumo_dict = dict(zip(colunas_corrigidas, medias_corrigidas))
-    
+    resumo_dict = {}
+    for col in colunas_corrigidas:
+        val = medias_janela[col] if col in medias_janela else None
+        resumo_dict[col] = val
+    # Adiciona dP_F/dz e dP_dz_total se existirem nas colunas do DataFrame
+    for col in df.columns:
+        if (col.startswith('dP_F/dz') or col.startswith('dP_dz_total')):
+            val = window_data[col].iloc[0] if len(window_data[col]) > 0 else None
+            if hasattr(val, 'nominal_value') and hasattr(val, 'std_dev'):
+                resumo_dict[col] = val.nominal_value
+                resumo_dict[f'u_{col}'] = val.std_dev
+            else:
+                resumo_dict[col] = val
     resumo_df = pd.DataFrame([resumo_dict])
-    
+
+    # Série temporal: para ufloat, salvar valor nominal e incerteza em colunas separadas
     window_df = pd.DataFrame()
     for col in colunas_corrigidas:
-        if col == 'dP_dz_gravitacional':
-            window_df[col] = window_data['dP_F/dz dP_dz_gravitacional']
-        elif col.startswith('dP_dz_total_'):
-            window_df[col] = dP_dz_total_values[col]
+        serie = window_data[col] if col in window_data else None
+        if serie is not None and hasattr(serie.iloc[0], 'nominal_value'):
+            window_df[col] = serie.apply(lambda x: x.nominal_value)
+            window_df[f'u_{col}'] = serie.apply(lambda x: x.std_dev)
         else:
-            window_df[col] = window_data[col]
-    
+            window_df[col] = serie
+            window_df[f'u_{col}'] = ''
+    # Adiciona dP_F/dz, dP_dz_total e dP_dz_gravitacional na série temporal
+    for col in df.columns:
+        if col.startswith('dP_F/dz') or col.startswith('dP_dz_total') or col.startswith('dP_dz_gravitacional'):
+            serie = window_data[col] if col in window_data else None
+            if serie is not None and hasattr(serie.iloc[0], 'nominal_value'):
+                window_df[col] = serie.apply(lambda x: x.nominal_value)
+                window_df[f'u_{col}'] = serie.apply(lambda x: x.std_dev)
+            else:
+                window_df[col] = serie
+                window_df[f'u_{col}'] = ''
     window_df.insert(0, 'Time (s)', window_data['X_Value'])
-    
+
     with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
         header_df.to_excel(writer, sheet_name='Info', index=False)
-        
         resumo_df.to_excel(writer, sheet_name='Resumo Medias', index=False, header=True)
-        
         window_df.to_excel(writer, sheet_name='Serie Temporal', index=False)
     
 
@@ -476,7 +496,7 @@ def uncert_propagation(df, colunas, start_idx, end_idx, best_window_size):
         uA = desvio / (n ** 0.5)
         medias.append(media)
         desvios.append(desvio)
-        uAs.append(uA)
+        uAs.append(uA)       
     return [c[0] for c in colunas], medias, desvios, uAs
 
 def calc_alpha(df, start_idx, end_idx):
@@ -505,25 +525,29 @@ def calc_frictional_pressure_gradient(df, colunas, start_idx, end_idx, best_wind
     indices_pdt = [i for i, col in enumerate(colunas) if col[0].startswith("PDT")]
 
     try:
-        pressao_ar_bar = df['PIT-M-0101'].iloc[start_idx:end_idx]
-        temp_ar_celsius = df['TIT-M-0101'].iloc[start_idx:end_idx]
+        pressao_gas_bar = unc.ufloat(df['PIT-M-0101'].iloc[start_idx:end_idx].mean(), 0.5)       ###### Conferir a incerteza
+        temp_gas_celsius = unc.ufloat(df['TIT-M-0101'].iloc[start_idx:end_idx].mean(), 0.5)      ###### Conferir a incerteza
         
-        pressao_ar_pa = (pressao_ar_bar + 1) * 1e5
-        temp_ar_k = temp_ar_celsius + 273.15
+        pressao_gas_pa = (pressao_gas_bar + 1) * 1e5
+        temp_gas_k = temp_gas_celsius + 273.15
         
-        rho_ar = [PropsSI('D', 'P', p, 'T', t, 'Air') for p, t in zip(pressao_ar_pa, temp_ar_k)]
-        rho_ar = pd.Series(rho_ar, index=pressao_ar_pa.index)
-    
-        try:
-            temp_agua_celsius = df['TIT-M-0101'].iloc[start_idx:end_idx]
-            temp_agua_k = temp_agua_celsius + 273.15
-            rho_agua = [PropsSI('D', 'T', t, 'P', 101325, 'Water') for t in temp_agua_k]
-            rho_agua = pd.Series(rho_agua, index=temp_agua_celsius.index)
-        except Exception as e:
-            rho_agua = 1000
+        # Calcular rho_gas apenas para o valor nominal
+        rho_gas_val = PropsSI('D', 'P', pressao_gas_pa.nominal_value, 'T', temp_gas_k.nominal_value, 'Air')
+        rho_gas = rho_gas_val  # Usar como escalar
+
+        if 'Water' in fluid_1 or 'Water' in fluid_2:
+            try:
+                temp_liquido_celsius = unc.ufloat(df['TIT-M-0101'].iloc[start_idx:end_idx].mean(), 0.5)      ###### Conferir a incerteza
+                temp_liquido_k = temp_liquido_celsius + 273.15
+                rho_liquido_val = PropsSI('D', 'T', temp_liquido_k.nominal_value, 'P', 101325, 'Water')
+                rho_liquido = rho_liquido_val  # Usar como escalar
+            except Exception as e:
+                rho_liquido = 1000
+        else:
+            rho_liquido = 1000  ####### Conferir novo rho do liquido sem ser water
 
     except KeyError as e:
-        rho_ar = None
+        rho_gas = None
 
     dP_F_df = pd.DataFrame()
 
@@ -533,32 +557,47 @@ def calc_frictional_pressure_gradient(df, colunas, start_idx, end_idx, best_wind
 
         if coluna_pdt_nome == sensor_Yokogawa:
             rho_tubbing = rho_s
+            if '30Kpa' in coluna_pdt_nome:         #### Mudar nome no Labview
+                    span_yokogawa = 60E3      
+            u_dP_F_over_dz = 0.0005*span_yokogawa
         else:
-            rho_tubbing = rho_agua
+            rho_tubbing = rho_liquido
+            
+            if "3kPa" in coluna_pdt_nome:
+                u_dP_F_over_dz = 0.0025*3000
+            elif "40kPa" in coluna_pdt_nome:
+                u_dP_F_over_dz = 0.0005*40000
         
         delta_p_prime = df[coluna_pdt_nome].iloc[start_idx:end_idx]
-        
-        termo_gravitacional = ((1-alpha_series)*rho_agua + alpha_series*rho_ar - rho_tubbing) * g * np.sin(theta_rad)
-        dP_dz_gravitacional = ((1-alpha_series)*rho_agua + alpha_series*rho_ar) * g * np.sin(theta_rad)
+        delta_p_prime_UNC = unc.ufloat(np.sqrt(np.mean(np.square(delta_p_prime))),u_dP_F_over_dz)
+        alpha = unc.ufloat(np.mean(alpha_series),0.05)
+        termo_gravitacional = ((1-alpha)*rho_liquido + alpha*rho_gas - rho_tubbing) * g * np.sin(theta_rad)
+        dP_dz_gravitacional = ((1-alpha)*rho_liquido + alpha*rho_gas) * g * np.sin(theta_rad)
 
         if direction in ['Upward', 'Horizontal']:
-            dP_F_over_dz_series = (delta_p_prime / L) - termo_gravitacional
-            dP_F_over_dz_RMS = np.sqrt(np.mean(np.square(dP_F_over_dz_series)))
-            dP_dz_total = dP_F_over_dz_RMS + np.mean(dP_dz_gravitacional)
+            dP_F_over_dz = (delta_p_prime_UNC / L) - termo_gravitacional
+            # dP_F_over_dz_RMS = np.sqrt(np.mean(np.square(dP_F_over_dz_series)))
+            # dP_F_over_dz_RMS = np.sqrt(np.mean(np.square(dP_F_over_dz_series)))
+            # dP_dz_total = dP_F_over_dz_RMS + np.mean(dP_dz_gravitacional)
+            dP_dz_total = dP_F_over_dz + dP_dz_gravitacional
         elif direction == 'Downward':
-            dP_F_over_dz_series = -(delta_p_prime / L) + termo_gravitacional 
-            dP_F_over_dz_RMS = np.sqrt(np.mean(np.square(dP_F_over_dz_series)))
-            dP_dz_total = -(dP_F_over_dz_RMS) + np.mean(dP_dz_gravitacional)
+            dP_F_over_dz = -(delta_p_prime_UNC / L) + termo_gravitacional 
+            # dP_F_over_dz_RMS = np.sqrt(np.mean(np.square(dP_F_over_dz_series)))
+            dP_dz_total = -(dP_F_over_dz) + np.mean(dP_dz_gravitacional)
 
-        dP_F_df[coluna_pdt_nome] = dP_F_over_dz_series
-        dP_F_df[f'dP_dz_total_{coluna_pdt_nome}'] = dP_dz_total
+        dP_F_df[coluna_pdt_nome] = dP_F_over_dz
+        print(coluna_pdt_nome,dP_F_over_dz, dP_dz_gravitacional, dP_dz_total)
+        dP_F_df[f'dP_dz_total_{coluna_pdt_nome}'] = dP_dz_total.nominal_value
+        dP_F_df[f'u_dP_dz_total_{coluna_pdt_nome}'] = dP_dz_total.std_dev
         if i == indices_pdt[0]:
-            dP_F_df['dP_dz_gravitacional'] = dP_dz_gravitacional
+            dP_F_df['dP_dz_gravitacional'] = dP_dz_gravitacional.nominal_value
+            dP_F_df['u_dP_dz_gravitacional'] = dP_dz_gravitacional.std_dev
 
     cols = [col for col in dP_F_df.columns if col != 'dP_dz_gravitacional']
-    cols.append('dP_dz_gravitacional')
+    cols.append('dP_dz_gravitacional') 
+    cols.append('u_dP_dz_gravitacional')
     dP_F_df = dP_F_df[cols]
-
+    
     return dP_F_df
 
 def extract_info_from_filename(filename: str):
@@ -749,18 +788,18 @@ if __name__ == "__main__":
 
     if any(col[0] == 'rho_g' for col in colunas_analise):
         try:
-            pressao_ar_bar_full = df['PIT-M-0101']
-            temp_ar_celsius_full = df['TIT-M-0101']
-            pressao_ar_pa_full = (pressao_ar_bar_full + 1) * 1e5
-            temp_ar_k_full = temp_ar_celsius_full + 273.15
-            rho_g_full = [PropsSI('D', 'P', p, 'T', t, 'Air') for p, t in zip(pressao_ar_pa_full, temp_ar_k_full)]
+            pressao_gas_bar_full = df['PIT-M-0101']
+            temp_gas_celsius_full = df['TIT-M-0101']
+            pressao_gas_pa_full = (pressao_gas_bar_full + 1) * 1e5
+            temp_gas_k_full = temp_gas_celsius_full + 273.15
+            rho_g_full = [PropsSI('D', 'P', p, 'T', t, 'Air') for p, t in zip(pressao_gas_pa_full, temp_gas_k_full)]
             df['rho_g'] = rho_g_full
         except Exception as e:
-            df['rho_g'] = (pressao_ar_pa_full) / (8.314 * temp_ar_k_full)
+            df['rho_g'] = (pressao_gas_pa_full) / (8.314 * temp_gas_k_full)
 
-    dP_F_df_full = calc_frictional_pressure_gradient(df, colunas_analise, 0, len(df), len(df), alpha_df_full['Alpha'])
-    for col in dP_F_df_full.columns:
-        df[f'dP_F/dz {col}'] = dP_F_df_full[col].values
+    # dP_F_df_full = calc_frictional_pressure_gradient(df, colunas_analise, 0, len(df), len(df), alpha_df_full['Alpha'])
+    # for col in dP_F_df_full.columns:
+    #     df[f'dP_F/dz {col}'] = dP_F_df_full[col].values
 
     colunas_analise_filtradas = [col for col in colunas_analise if col[0] in df.columns]
     if len(colunas_analise_filtradas) < len(colunas_analise):
