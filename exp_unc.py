@@ -525,21 +525,26 @@ def calc_frictional_pressure_gradient(df, colunas, start_idx, end_idx, best_wind
     indices_pdt = [i for i, col in enumerate(colunas) if col[0].startswith("PDT")]
 
     try:
-        pressao_gas_bar = unc.ufloat(df['PIT-M-0101'].iloc[start_idx:end_idx].mean(), 0.5)       ###### Conferir a incerteza
-        temp_gas_celsius = unc.ufloat(df['TIT-M-0101'].iloc[start_idx:end_idx].mean(), 0.5)      ###### Conferir a incerteza
-        
+        uT = 0.5        ###### Conferir a incerteza
+        uP = 0.5        ###### Conferir a incerteza
+        pressao_gas_bar = df['PIT-M-0101'].iloc[start_idx:end_idx].mean()       
+        temp_gas_celsius = df['TIT-M-0101'].iloc[start_idx:end_idx].mean()      
+        R_gas = 287 
         pressao_gas_pa = (pressao_gas_bar + 1) * 1e5
         temp_gas_k = temp_gas_celsius + 273.15
         
         # Calcular rho_gas apenas para o valor nominal
-        rho_gas_val = PropsSI('D', 'P', pressao_gas_pa.nominal_value, 'T', temp_gas_k.nominal_value, 'Air')
-        rho_gas = rho_gas_val  # Usar como escalar
+        rho_gas_val = PropsSI('D', 'P', pressao_gas_pa, 'T', temp_gas_k, 'Air')
+        drho_dP = 1/(R_gas*temp_gas_k)
+        drho_dT = -pressao_gas_pa/(R_gas*temp_gas_k**2)
+        u_rho_gas = np.sqrt((temp_gas_k * pressao_gas_pa * uT / (rho_gas_val*R_gas*temp_gas_k**2))**2 + (pressao_gas_pa * uP / (rho_gas_val * R_gas * temp_gas_k))**2)
+        rho_gas = unc.ufloat(rho_gas_val,u_rho_gas)  # Usar como escalar
 
         if 'Water' in fluid_1 or 'Water' in fluid_2:
             try:
-                temp_liquido_celsius = unc.ufloat(df['TIT-M-0101'].iloc[start_idx:end_idx].mean(), 0.5)      ###### Conferir a incerteza
+                temp_liquido_celsius = df['TIT-M-0101'].iloc[start_idx:end_idx].mean()      ###### Conferir a incerteza
                 temp_liquido_k = temp_liquido_celsius + 273.15
-                rho_liquido_val = PropsSI('D', 'T', temp_liquido_k.nominal_value, 'P', 101325, 'Water')
+                rho_liquido_val = PropsSI('D', 'T', temp_liquido_k, 'P', 101325, 'Water')
                 rho_liquido = rho_liquido_val  # Usar como escalar
             except Exception as e:
                 rho_liquido = 1000
@@ -550,6 +555,7 @@ def calc_frictional_pressure_gradient(df, colunas, start_idx, end_idx, best_wind
         rho_gas = None
 
     dP_F_df = pd.DataFrame()
+    print(rho_gas)
 
     for i in indices_pdt:
         coluna_pdt_nome = colunas[i][0]
