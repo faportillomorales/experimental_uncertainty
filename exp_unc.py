@@ -280,12 +280,7 @@ def save_results(df: pd.DataFrame, coluna_escolhida: str, start_idx: int, end_id
             dP_dz_total_values[col] = dP_dz_total
         elif col.startswith('PDT-'):
             y_data = window_data[col]
-            y_min = y_data.min()
-            y_max = y_data.max()
-            if (y_min/abs(y_min)) != (y_max/abs(y_max)):
-                medias_corrigidas.append(np.sqrt(np.mean(np.square(y_data))))
-            else:
-                medias_corrigidas.append(y_data.mean())
+            medias_corrigidas.append(np.sqrt(np.mean(np.square(y_data))))
         elif col.startswith('dP_F/dz PDT'):
             y_data = window_data[col]
             medias_corrigidas.append(np.sqrt(np.mean(np.square(y_data))))
