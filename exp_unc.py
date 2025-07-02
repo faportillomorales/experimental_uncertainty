@@ -10,22 +10,21 @@ import sys
 ####################################################################################################################################################
 #                                            INPUTS
 ####################################################################################################################################################
-file_path = 'example/AWD45/AWD45P01/AWD45P01' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
+file_path = 'data_example/example/AWD45/AWD45P01/AWD45P01' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
 
 L = 1.70         # m comprimento entre as tomadas de diferencial de pressão
 
 # Valores de calibração do densitômetro IMPORTANTE
-I_g = 275191                     # Insira a intensidade padrão para o gás (Calibração do densitômetro)
-I_f = 164176                      # Insira a intensidade padrão para o líquido (Calibração do densitômetro)
+I_g = 252883                     # Insira a intensidade padrão para o gás (Calibração do densitômetro)
+I_f = 151287                      # Insira a intensidade padrão para o líquido (Calibração do densitômetro)
 
-sensor_Yokogawa = 'PDT-M-0101C-10kPa_mA'
+sensor_Yokogawa = 'PDT-M-0101D-30Kpa_mA'
 sensor_Endress = 'PDT-M-0101-40kPa_mA'
 
 ### Colunas de interesse -> Insira o nome das colunas a plotar e avaliar do arquivo .dat
 # Lista de colunas para análise: [nome_coluna, apelido, unidade]
 colunas_analise = [
-    ['PDT-M-0101-40kPa', r'\Delta P_{40\,kPa} / L', r'[Pa/m]'],
-    ['PDT-M-0101C-3kPa', r'\Delta P_{3\,kPa} / L', r'[Pa/m]'],
+    [sensor_Yokogawa, r'\Delta P_{30\,kPa} / L', r'[Pa/m]'],
     ['Alpha', r'\alpha', r''],
     ['J Agua corrigido', r'J_{water}', r'[m/s]'],
     ['J Ar corrigido', r'J_{air}', r'[m/s]'],
@@ -191,6 +190,140 @@ def format_filename(alias: str, unit: str) -> str:
     
     return name
 
+def uncertainties_calc(resumo_df,window_df):
+    if '30Kpa' in sensor_Yokogawa:         #### Mudar nome no Labview
+        span_yokogawa = 60E3      
+    elif '10Kpa' in sensor_Yokogawa:
+        span_yokogawa = 20E3     
+
+    # Incerteza dos sensores Yokogawa
+    udP = 0.0005*span_yokogawa
+    dP_mean = np.mean(window_df[sensor_Yokogawa])
+    dP = unc.ufloat(dP_mean,udP)
+    print(sensor_Yokogawa)
+    print('dP: ', dP)
+
+    # Incerteza de Alpha estimada
+    uAlpha = 0.015
+    Alpha = unc.ufloat(resumo_df['Alpha'].iloc[0],uAlpha)
+    print('Alpha: ', Alpha)
+
+    T_mean = resumo_df['TIT-M-0101'].iloc[0]
+    uT = 0.02*T_mean
+    T = unc.ufloat(T_mean,uT)
+    T_abs = T + 273.15
+    print('T: ', T)
+
+    P_mean = (resumo_df['PIT-M-0101'].iloc[0] + 1) * 1E5            #Absolute pressure in Pa
+    uP = 0.0025*P_mean
+    P = unc.ufloat(P_mean,uP)
+    print('P: ', P)
+    
+    # Cálculo da incerteza da densidade do gás
+    M_ar = 28.96e-3 #[kg/kmol]			    # Massa molecular do ar em [kg/kmol] 
+    R = 8.314 #[kJ/kmolK]				    # Constante universal dos gases [kJ/kmol.K] 
+    rho_G = (P * M_ar) / (R * T_abs)	# Densidade média do ar em [kg/m^3] 
+    u_rho_g = rho_G.std_dev
+    print('u_rho_g: ', rho_G)
+
+    # Cálcuo da incerteza da densidade do líquido
+    rho_L = - 0.0042*(T**2) - 0.0529*T + 1000.9		# Média da densidade do líquido
+    u_rho_l = rho_L.std_dev
+    print('u_rho_l: ', rho_L)
+
+    rho_tubbing = rho_s
+    print('rho_tubbing: ', rho_tubbing)
+    theta_rad = np.deg2rad(theta)
+    print('theta_rad: ', theta_rad)
+
+    g = 9.81
+    uL = 0.5E-3
+    L_ = unc.ufloat(L,uL)
+    print('L: ', L_)
+
+
+    dPg_dz = ((1-Alpha)*rho_L + Alpha*rho_G) * g * np.sin(theta_rad)
+    print(f'dPg_dz: {dPg_dz:.3f}')
+    # Cálculo da incerteza do friccional
+            
+    if direction in ['Upward', 'Horizontal']:
+        dPf_dz = (dP/L_) - ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
+        dPt_dz = abs(dPf_dz) + dPg_dz
+    elif direction == 'Downward':
+        print('Downward')
+        dPf_dz = -(dP/L_) + ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
+        dPt_dz = -abs(dPf_dz) + dPg_dz
+    
+    print(f'dPf_dz: {dPf_dz:.3f}')
+    print(f'dPt_dz: {dPt_dz:.3f}')
+    
+    # Alocando as incetezas
+    udPf_dz = dPf_dz.std_dev
+    udPg_dz = dPg_dz.std_dev
+    udPt_dz = dPt_dz.std_dev
+
+    # Adicionar a incerteza ao resumo_df logo após a coluna dP_F_dz do sensor Yokogawa
+    col_name = f'dP_F/dz {sensor_Yokogawa}'
+    unc_col_name = f'udP_F_dz_{sensor_Yokogawa}'
+    if col_name in resumo_df.columns:
+        items = list(resumo_df.iloc[0].items())
+        idx = [i for i, (k, v) in enumerate(items) if k == col_name]
+        if idx:
+            insert_pos = idx[0] + 1
+            items.insert(insert_pos, (unc_col_name, udPf_dz))
+            resumo_df = pd.DataFrame([dict(items)])
+        else:
+            resumo_df[unc_col_name] = udPf_dz
+    else:
+        resumo_df[unc_col_name] = udPf_dz
+
+    # Adicionar a incerteza ao resumo_df logo após a coluna Alpha
+    alpha_col_name = 'Alpha'
+    alpha_unc_col_name = 'uAlpha'
+    if alpha_col_name in resumo_df.columns:
+        items = list(resumo_df.iloc[0].items())
+        idx = [i for i, (k, v) in enumerate(items) if k == alpha_col_name]
+        if idx:
+            insert_pos = idx[0] + 1
+            items.insert(insert_pos, (alpha_unc_col_name, uAlpha))
+            resumo_df = pd.DataFrame([dict(items)])
+        else:
+            resumo_df[alpha_unc_col_name] = uAlpha
+    else:
+        resumo_df[alpha_unc_col_name] = uAlpha
+
+    # Adicionar a incerteza ao resumo_df logo após a coluna dP_dz_gravitacional
+    grav_col_name = 'dP_dz_gravitacional'
+    grav_unc_col_name = 'udP_dz_gravitacional'
+    if grav_col_name in resumo_df.columns:
+        items = list(resumo_df.iloc[0].items())
+        idx = [i for i, (k, v) in enumerate(items) if k == grav_col_name]
+        if idx:
+            insert_pos = idx[0] + 1
+            items.insert(insert_pos, (grav_unc_col_name, udPg_dz))
+            resumo_df = pd.DataFrame([dict(items)])
+        else:
+            resumo_df[grav_unc_col_name] = udPg_dz
+    else:
+        resumo_df[grav_unc_col_name] = udPg_dz
+
+    # Adicionar a incerteza ao resumo_df logo após a coluna dP_dz_total do sensor Yokogawa
+    total_col_name = f'dP_dz_total_{sensor_Yokogawa}'
+    total_unc_col_name = f'udP_dz_total_{sensor_Yokogawa}'
+    if total_col_name in resumo_df.columns:
+        items = list(resumo_df.iloc[0].items())
+        idx = [i for i, (k, v) in enumerate(items) if k == total_col_name]
+        if idx:
+            insert_pos = idx[0] + 1
+            items.insert(insert_pos, (total_unc_col_name, udPt_dz))
+            resumo_df = pd.DataFrame([dict(items)])
+        else:
+            resumo_df[total_unc_col_name] = udPt_dz
+    else:
+        resumo_df[total_unc_col_name] = udPt_dz
+
+    return resumo_df
+
 def save_results(df: pd.DataFrame, coluna_escolhida: str, start_idx: int, end_idx: int, min_std: float, media_janela: float, 
                 min_window_size: float, max_window_size: float, best_window_size: float, file_path: str, data_teste: str, 
                 fluid_1: str, fluid_2: str, direction: str, theta: int, ID: str, nomes: list = None, medias: list = None, desvios: list = None, uAs: list = None,
@@ -288,10 +421,36 @@ def save_results(df: pd.DataFrame, coluna_escolhida: str, start_idx: int, end_id
             medias_corrigidas.append(medias_janela[col])
     
     resumo_dict = dict(zip(colunas_corrigidas, medias_corrigidas))
-    
+
+    # Calcular rho_agua médio na janela
+    try:
+        if 'TIT-M-0101' in window_data.columns:
+            temp_agua_celsius = window_data['TIT-M-0101']
+            temp_agua_k = temp_agua_celsius + 273.15
+            rho_agua_vals = [PropsSI('D', 'T', t, 'P', 101325, 'Water') for t in temp_agua_k]
+            rho_agua_medio = np.mean(rho_agua_vals)
+        else:
+            rho_agua_medio = 1000
+    except Exception as e:
+        rho_agua_medio = 1000
+
+    # Inserir rho_agua logo após rho_g
+    if 'rho_g' in resumo_dict:
+        items = list(resumo_dict.items())
+        idx = [i for i, (k, v) in enumerate(items) if k == 'rho_g']
+        if idx:
+            insert_pos = idx[0] + 1
+            items.insert(insert_pos, ('rho_agua', rho_agua_medio))
+            resumo_dict = dict(items)
+        else:
+            resumo_dict['rho_agua'] = rho_agua_medio
+    else:
+        resumo_dict['rho_agua'] = rho_agua_medio
+
     resumo_df = pd.DataFrame([resumo_dict])
     
     window_df = pd.DataFrame()
+
     for col in colunas_corrigidas:
         if col == 'dP_dz_gravitacional':
             window_df[col] = window_data['dP_F/dz dP_dz_gravitacional']
@@ -302,11 +461,12 @@ def save_results(df: pd.DataFrame, coluna_escolhida: str, start_idx: int, end_id
     
     window_df.insert(0, 'Time (s)', window_data['X_Value'])
     
+    # Atualizar resumo_df com as incertezas e salvar no Excel
+    resumo_df = uncertainties_calc(resumo_df, window_df)
+
     with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
         header_df.to_excel(writer, sheet_name='Info', index=False)
-        
         resumo_df.to_excel(writer, sheet_name='Resumo Medias', index=False, header=True)
-        
         window_df.to_excel(writer, sheet_name='Serie Temporal', index=False)
     
 
@@ -363,7 +523,7 @@ def plot_time_series(df, colunas, output_dir, base_name):
         
         ax.axhline(y=media_serie, color='g', linestyle='--', label=f'Mean: {media_serie:.4f}')
         ax.axhline(y=media_serie + desvio_serie, color='r', linestyle=':', label=f'std: ±{desvio_serie:.4f}')
-        if nome_coluna.startswith('PDT-') and (y_min/abs(y_min)) != (y_max/abs(y_max)):
+        if nome_coluna.startswith('PDT-'):
             ax.axhline(y=rms_pdt, color='g', linestyle='-', label=f'RMS: {rms_pdt:.4f}')
         ax.axhline(y=media_serie - desvio_serie, color='r', linestyle=':')
         ax.legend(fontsize=8, loc='upper right')
@@ -435,7 +595,7 @@ def plot_windows(df, colunas, start_idx, end_idx, best_window_size, output_dir, 
         
         ax.axhline(y=media_janela, color='g', linestyle='--', label=f'Mean: {media_janela:.4f}')
         ax.axhline(y=media_janela + desvio_janela, color='r', linestyle=':', label=f'std: ±{desvio_janela:.4f}')
-        if nome_coluna.startswith('PDT-') and (y_min/abs(y_min)) != (y_max/abs(y_max)):
+        if nome_coluna.startswith('PDT-'):
             ax.axhline(y=rms_pdt_win, color='g', linestyle='-', label=f'RMS: {rms_pdt_win:.4f}')
         ax.axhline(y=media_janela - desvio_janela, color='r', linestyle=':')
         ax.legend(fontsize=8, loc='upper right')
@@ -872,6 +1032,8 @@ if __name__ == "__main__":
     
     plot_pressure_gradients(df, dP_F_df, start_idx, end_idx, output_dir, base_name, sensor_Yokogawa, sensor_Endress, direction)
     print("Arquivo excel dos dados tratados criado...")
+
+
 
     print('##########################################################################')
     print('#AEEEE! Parabéns executado com sucesso, boa sorte com a análise de dados!#')
