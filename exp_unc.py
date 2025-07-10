@@ -200,50 +200,50 @@ def uncertainties_calc(resumo_df,window_df):
     udP = 0.00055*span_yokogawa
     dP_mean = np.mean(window_df[sensor_Yokogawa])
     dP = unc.ufloat(dP_mean,udP)
-    print(sensor_Yokogawa)
-    print(f'dP: {dP:.3f}')
+    # print(sensor_Yokogawa)
+    # print(f'dP: {dP:.3f}')
 
     # Incerteza de Alpha estimada
     uAlpha = 0.01667 #0.015
     Alpha = unc.ufloat(resumo_df['Alpha'].iloc[0],uAlpha)
-    print('Alpha: ', Alpha)
+    # print('Alpha: ', Alpha)
 
     T_mean = resumo_df['TIT-M-0101'].iloc[0]
     uT = 0.15 + 0.02*T_mean
     T = unc.ufloat(T_mean,uT)
     T_abs = T + 273.15
-    print('T: ', T)
+    # print('T: ', T)
 
     P_mean = (resumo_df['PIT-M-0101'].iloc[0] + 1) * 1E5            #Absolute pressure in Pa
     uP = 0.0025*P_mean
     P = unc.ufloat(P_mean,uP)
-    print('P: ', P)
+    # print('P: ', P)
     
     # Cálculo da incerteza da densidade do gás
     M_ar = 28.96e-3 #[kg/kmol]			    # Massa molecular do ar em [kg/kmol] 
     R = 8.314 #[kJ/kmolK]				    # Constante universal dos gases [kJ/kmol.K] 
     rho_G = (P * M_ar) / (R * T_abs)	# Densidade média do ar em [kg/m^3] 
     u_rho_g = rho_G.std_dev
-    print('u_rho_g: ', rho_G)
+    # print('u_rho_g: ', rho_G)
 
     # Cálcuo da incerteza da densidade do líquido
     rho_L = - 0.0042*(T**2) - 0.0529*T + 1000.9		# Média da densidade do líquido
     u_rho_l = rho_L.std_dev
-    print('u_rho_l: ', rho_L)
+    # print('u_rho_l: ', rho_L)
 
     rho_tubbing = rho_s
-    print('rho_tubbing: ', rho_tubbing)
+    # print('rho_tubbing: ', rho_tubbing)
     theta_rad = np.deg2rad(theta)
-    print('theta_rad: ', theta_rad)
+    # print('theta_rad: ', theta_rad)
 
     g = 9.81
     uL = 0.5E-3
     L_ = unc.ufloat(L,uL)
-    print('L: ', L_)
+    # print('L: ', L_)
 
 
     dPg_dz = ((1-Alpha)*rho_L + Alpha*rho_G) * g * np.sin(theta_rad)
-    print(f'dPg_dz: {dPg_dz:.3f}')
+    # print(f'dPg_dz: {dPg_dz:.3f}')
     # Cálculo da incerteza do friccional
             
     if direction in ['Upward', 'Horizontal']:
@@ -254,8 +254,8 @@ def uncertainties_calc(resumo_df,window_df):
         dPf_dz = -(dP/L_) + ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
         dPt_dz = -(abs(dPf_dz)) + dPg_dz
     
-    print(f'dPf_dz: {dPf_dz:.3f}')
-    print(f'dPt_dz: {dPt_dz:.3f}')
+    # print(f'dPf_dz: {dPf_dz:.3f}')
+    # print(f'dPt_dz: {dPt_dz:.3f}')
     
     # Alocando as incetezas
     udPf_dz = dPf_dz.std_dev
