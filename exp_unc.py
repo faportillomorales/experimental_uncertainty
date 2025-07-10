@@ -10,7 +10,7 @@ import sys
 ####################################################################################################################################################
 #                                            INPUTS
 ####################################################################################################################################################
-file_path = 'data_example/example/AWD45/AWD45P01/AWD45P01' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
+file_path = 'data_example/example/AWU90/AWU90P01/AWU90P01' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
 
 L = 1.70         # m comprimento entre as tomadas de diferencial de pressão
 
@@ -191,25 +191,25 @@ def format_filename(alias: str, unit: str) -> str:
     return name
 
 def uncertainties_calc(resumo_df,window_df):
-    if '30Kpa' in sensor_Yokogawa:         #### Mudar nome no Labview
-        span_yokogawa = 60E3      
-    elif '10Kpa' in sensor_Yokogawa:
-        span_yokogawa = 20E3     
+    if '-30' in sensor_Yokogawa:         #### Mudar nome no Labview
+        span_yokogawa = 29E3  
+    elif '-10' in sensor_Yokogawa:
+        span_yokogawa = 9E3     
 
     # Incerteza dos sensores Yokogawa
-    udP = 0.0005*span_yokogawa
+    udP = 0.00055*span_yokogawa
     dP_mean = np.mean(window_df[sensor_Yokogawa])
     dP = unc.ufloat(dP_mean,udP)
     print(sensor_Yokogawa)
-    print('dP: ', dP)
+    print(f'dP: {dP:.3f}')
 
     # Incerteza de Alpha estimada
-    uAlpha = 0.015
+    uAlpha = 0.01667 #0.015
     Alpha = unc.ufloat(resumo_df['Alpha'].iloc[0],uAlpha)
     print('Alpha: ', Alpha)
 
     T_mean = resumo_df['TIT-M-0101'].iloc[0]
-    uT = 0.02*T_mean
+    uT = 0.15 + 0.02*T_mean
     T = unc.ufloat(T_mean,uT)
     T_abs = T + 273.15
     print('T: ', T)
@@ -248,11 +248,11 @@ def uncertainties_calc(resumo_df,window_df):
             
     if direction in ['Upward', 'Horizontal']:
         dPf_dz = (dP/L_) - ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
-        dPt_dz = abs(dPf_dz) + dPg_dz
+        dPt_dz = dPf_dz + dPg_dz
     elif direction == 'Downward':
         print('Downward')
         dPf_dz = -(dP/L_) + ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
-        dPt_dz = -abs(dPf_dz) + dPg_dz
+        dPt_dz = -(abs(dPf_dz)) + dPg_dz
     
     print(f'dPf_dz: {dPf_dz:.3f}')
     print(f'dPt_dz: {dPt_dz:.3f}')
@@ -413,7 +413,12 @@ def save_results(df: pd.DataFrame, coluna_escolhida: str, start_idx: int, end_id
             dP_dz_total_values[col] = dP_dz_total
         elif col.startswith('PDT-'):
             y_data = window_data[col]
-            medias_corrigidas.append(np.sqrt(np.mean(np.square(y_data))))
+            y_min = y_data.min()
+            y_max = y_data.max()
+            if (y_min/abs(y_min)) != (y_max/abs(y_max)):
+                medias_corrigidas.append(np.sqrt(np.mean(np.square(y_data))))
+            else:
+                medias_corrigidas.append(y_data.mean())
         elif col.startswith('dP_F/dz PDT'):
             y_data = window_data[col]
             medias_corrigidas.append(np.sqrt(np.mean(np.square(y_data))))
