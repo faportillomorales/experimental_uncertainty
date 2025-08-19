@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MultipleLocator
 import os
 import sys
 from pathlib import Path
@@ -279,11 +280,11 @@ def generate_jg_vs_alpha_plot(df, sheet_name):
         # Configurar estilo científico para LaTeX
         plt.style.use('default')
         plt.rcParams.update({
-            'font.size': 12,
+            'font.size': 18,
             'font.family': 'serif',
-            'text.usetex': False,  # Desabilitar LaTeX para compatibilidade
+            'text.usetex': False,  # Habilitar LaTeX para renderização matemática
             'axes.linewidth': 1.0,
-            'axes.grid': True,
+            'axes.grid': False,
             'grid.alpha': 0.3,
             'grid.linestyle': '--',
             'figure.dpi': 300,
@@ -297,7 +298,7 @@ def generate_jg_vs_alpha_plot(df, sheet_name):
         })
         
         # Criar figura
-        fig, ax = plt.subplots(figsize=(10, 8))  # Aumentar tamanho para acomodar legenda
+        fig, ax = plt.subplots(figsize=(10, 10))  # Figura quadrada 10x10
         
         # Obter valores únicos de jL e agrupar por séries
         jl_col = col_mapping['jL']
@@ -315,57 +316,87 @@ def generate_jg_vs_alpha_plot(df, sheet_name):
         
         print(f"Séries de jL encontradas: {jl_series}")
         
-        # Cores em escala de cinza (maior jL = mais escuro, menor jL = mais claro)
-        # Gerar cores baseadas nos valores de jL
-        gray_colors = []
-        for jl in jl_series:
-            # Normalizar jL entre 0 e 1, onde 0 = mais claro, 1 = mais escuro
-            jl_min = min(jl_series)
-            jl_max = max(jl_series)
-            if jl_max > jl_min:
-                normalized_jl = (jl - jl_min) / (jl_max - jl_min)
-            else:
-                normalized_jl = 0.5  # Se todos os valores são iguais
+        # # Cores em escala de cinza (maior jL = mais escuro, menor jL = mais claro)
+        # # Gerar cores baseadas nos valores de jL
+        # gray_colors = []
+        # for jl in jl_series:
+        #     # Normalizar jL entre 0 e 1, onde 0 = mais claro, 1 = mais escuro
+        #     jl_min = min(jl_series)
+        #     jl_max = max(jl_series)
+        #     if jl_max > jl_min:
+        #         normalized_jl = (jl - jl_min) / (jl_max - jl_min)
+        #     else:
+        #         normalized_jl = 0.5  # Se todos os valores são iguais
             
-            # Converter para escala de cinza (0.3 = cinza claro, 0.9 = cinza escuro)
-            # jL = 0.2 → cinza claro, jL = 1.8 → cinza escuro
-            gray_value = 0.3 + 0.6 * normalized_jl
-            gray_color = f'#{int(gray_value * 255):02x}{int(gray_value * 255):02x}{int(gray_value * 255):02x}'
-            gray_colors.append(gray_color)
+        #     # Converter para escala de cinza (0.3 = cinza claro, 0.9 = cinza escuro)
+        #     # jL = 0.2 → cinza claro, jL = 1.8 → cinza escuro
+        #     gray_value = 0.6 * normalized_jl
+        #     gray_color = f'#{int(gray_value * 255):02x}{int(gray_value * 255):02x}{int(gray_value * 255):02x}'
+        #     gray_colors.append(gray_color)
         
-        colors = gray_colors
+        # colors = gray_colors[::-1]
         
+        #Lista de cores
+        colors = ['red', 'blue', 'orange', 'yellow', 'silver', 'white']
+        # Estilos de linha para diferentes séries
+        line_styles = ['-', '--', ':', '-.', '-', '--', ':', '-.', '-', '--']
+        # Simbolos para as linhas
+        symbol_line = ['o','h', 's', 'D', '^', 'v' ]
         # Símbolos para Flow Patterns (expandido para todos os padrões encontrados)
-        flow_pattern_symbols = {
-            'Elongated Bubble': 'o',      # Círculo
-            'Slug': 's',                  # Quadrado
-            'slug': 's',                  # Quadrado (minúsculo)
-            'sw': '^',                    # Triângulo para cima
-            'SW': '^',                    # Triângulo para cima
-            'SS': 'v',                    # Triângulo para baixo
-            'Estratificado': 'D',         # Diamante
-            'SW/MI': 'p',                 # Pentágono
-            'Intermitent (Slug Wavy)²': 'h',  # Hexágono
-            'Intermitent (Slug Wavy) ²': 'h', # Hexágono
-            'Intermitent (Slug Wavy)¹ ²': 'H', # Hexágono grande
-            'Rolling Wave²': '8',         # Octágono
-            'DBubbly': 'P',               # Plus
-            'A': 'X',                     # X
-            'B': 'd',                     # Diamante pequeno
-            'EB-A (I)': 'o',              # Círculo
-            'EB-A  (I)': 'o',             # Círculo
-            'EB-B (I)': 'o',              # Círculo
-            'B-SL (I)': 's',              # Quadrado
-            'SL (I)': 's',                # Quadrado
-            'annular': 'o',               # Círculo
-            'churn': 's',                 # Quadrado
-            'Churn': 's',                 # Quadrado
-            'Churn/bolhas?': 's',         # Quadrado
-            'Churn?': 's',                # Quadrado
-            'bubbles': 'o',               # Círculo
-            'Intermitent¹ ²': 'h'         # Hexágono
-        }
+        # flow_pattern_symbols = {
+        #     'Elongated Bubble': 'o',      # Círculo
+        #     'Slug': 's',                  # Quadrado
+        #     'slug': 's',                  # Quadrado (minúsculo)
+        #     'sw': '^',                    # Triângulo para cima
+        #     'SW': '^',                    # Triângulo para cima
+        #     'SS': 'v',                    # Triângulo para baixo
+        #     'Estratificado': 'D',         # Diamante
+        #     'SW/MI': 'p',                 # Pentágono
+        #     'Intermitent (Slug Wavy)²': 'h',  # Hexágono
+        #     'Intermitent (Slug Wavy) ²': 'h', # Hexágono
+        #     'Intermitent (Slug Wavy)¹ ²': 'H', # Hexágono grande
+        #     'Rolling Wave²': '8',         # Octágono
+        #     'DBubbly': 'P',               # Plus
+        #     'A': 'X',                     # X
+        #     'B': 'd',                     # Diamante pequeno
+        #     'EB-A (I)': 'o',              # Círculo
+        #     'EB-A  (I)': 'o',             # Círculo
+        #     'EB-B (I)': 'o',              # Círculo
+        #     'B-SL (I)': 's',              # Quadrado
+        #     'SL (I)': 's',                # Quadrado
+        #     'annular': 'o',               # Círculo
+        #     'churn': 's',                 # Quadrado
+        #     'Churn': 's',                 # Quadrado
+        #     'Churn/bolhas?': 's',         # Quadrado
+        #     'Churn?': 's',                # Quadrado
+        #     'bubbles': 'o',               # Círculo
+        #     'Intermitent¹ ²': 'h'         # Hexágono
+        # }
         
+        flow_pattern_symbols = {
+            'Elongated Bubble': {'symbol': 'o', 'color': 'blue'},
+            'Slug': {'symbol': 's', 'color': 'green'},
+            'slug': {'symbol': 's', 'color': 'green'},
+            'sw': {'symbol': '^', 'color': 'red'},
+            'SW': {'symbol': '^', 'color': 'red'},
+            'SS': {'symbol': 'v', 'color': 'purple'},
+            'Estratificado': {'symbol': 'D', 'color': 'orange'},
+            'SW/MI': {'symbol': 'p', 'color': 'cyan'},
+            'Intermitent (Slug Wavy)²': {'symbol': 'h', 'color': 'magenta'},
+            'Intermitent (Slug Wavy) ²': {'symbol': 'h', 'color': 'magenta'},
+            'Intermitent (Slug Wavy)¹ ²': {'symbol': 'H', 'color': 'brown'},
+            'Rolling Wave²': {'symbol': 'D', 'color': 'pink'},
+            'DBubbly': {'symbol': 'P', 'color': 'gray'},
+            'SL (I)': {'symbol': 's', 'color': 'maroon'},
+            'annular': {'symbol': 'o', 'color': 'blue'},
+            'churn': {'symbol': 's', 'color': 'green'},
+            'Churn': {'symbol': 's', 'color': 'green'},
+            'Churn/bolhas?': {'symbol': 's', 'color': 'green'},
+            'Churn?': {'symbol': 's', 'color': 'green'},
+            'bubbles': {'symbol': 'o', 'color': 'blue'},
+            'Intermitent': {'symbol': 'h', 'color': 'magenta'}
+        }
+        vec_s_lines = []
         # Plotar cada série de jL
         for i, jl in enumerate(jl_series):
             # Filtrar dados para esta série de jL
@@ -380,24 +411,32 @@ def generate_jg_vs_alpha_plot(df, sheet_name):
             jg_clean = jg_data[valid_mask]
             alpha_clean = alpha_data[valid_mask]
             flow_pattern_clean = flow_pattern_data[valid_mask]
-            
             if len(jg_clean) > 0:
                 color = colors[i % len(colors)]
-                
+                line_style = line_styles[i % len(line_styles)] # Escolher estilo de linha
+                s_lines = symbol_line[i % len(symbol_line)]
+                vec_s_lines.append(s_lines)
                 # Ordenar dados por jG para conectar corretamente
                 sorted_data = sorted(zip(jg_clean, alpha_clean, flow_pattern_clean))
                 jg_sorted = [x[0] for x in sorted_data]
                 alpha_sorted = [x[1] for x in sorted_data]
                 flow_pattern_sorted = [x[2] for x in sorted_data]
                 
-                # Plotar linha conectando os pontos
-                ax.plot(jg_sorted, alpha_sorted, '-', color=color, linewidth=2, alpha=0.6)
                 
+                    
+                # Plotar linha conectando os pontos (todas pretas, estilo varia por série)
+                ax.plot(jg_sorted, alpha_sorted, line_style, marker=s_lines, markersize=18, color='black', mfc='silver', linewidth=1.5, zorder=1)
+                # ax.plot(jg_sorted, alpha_sorted, line_style, marker=s_lines, markersize=16, color='black', mfc='silver', linewidth=1.5, zorder=1)
+
                 # Plotar cada ponto com símbolo baseado no Flow Pattern
                 for j, (jg_val, alpha_val, flow_pattern) in enumerate(zip(jg_sorted, alpha_sorted, flow_pattern_sorted)):
-                    symbol = flow_pattern_symbols.get(flow_pattern, 'o')
-                    ax.scatter(jg_val, alpha_val, c=color, marker=symbol, s=80, alpha=0.9, 
-                             edgecolors='black', linewidth=1)
+                    pattern_data = flow_pattern_symbols.get(flow_pattern, {'symbol': 'x', 'color': 'gray'})
+                    symbol = pattern_data['symbol']
+                    color = pattern_data['color']
+                    ax.scatter(jg_val, alpha_val,c=color, marker=symbol, s=120, 
+                             edgecolors='black', linewidth=1, zorder=2)
+                    
+                
                 
                 print(f"Plotando série jL = {jl:.1f} m/s com {len(jg_clean)} pontos")
         
@@ -409,27 +448,43 @@ def generate_jg_vs_alpha_plot(df, sheet_name):
         
         legend_elements = []
         for pattern in sorted(used_patterns):
-            symbol = flow_pattern_symbols[pattern]
+            pattern_data = flow_pattern_symbols.get(flow_pattern, {'symbol': 'x', 'color': 'gray'})
+            symbol = pattern_data['symbol']
+            color = pattern_data['color']
             legend_elements.append(plt.Line2D([0], [0], marker=symbol, color='w', 
-                                            markerfacecolor='gray', markersize=8, 
+                                            markerfacecolor=color, markersize=10, 
                                             markeredgecolor='black', markeredgewidth=1,
                                             label=pattern))
         
+        x_label = r'$j_{g} [m/s]$'
+        y_label = r'Void fraction ($\alpha_g$)'
         # Configurar eixos com fonte acadêmica
-        ax.set_xlabel('jG (m/s)', fontsize=14, fontweight='bold', fontfamily='serif')
-        ax.set_ylabel('α (-)', fontsize=14, fontweight='bold', fontfamily='serif')
+        ax.set_xlabel(x_label, fontsize=24, fontfamily='serif')
+        ax.set_ylabel(y_label, fontsize=24, fontfamily='serif')
         # Remover título conforme solicitado
         
-        # Configurar grade
-        ax.grid(True, alpha=0.3, linestyle='--')
+        # Configurar grade refinada
+        # ax.grid(True, which='major', alpha=0.5, linestyle='-', linewidth=0.8, color='gray')
+        # ax.grid(True, which='minor', alpha=0.5, linestyle=':', linewidth=0.8, color='lightgray')
         ax.set_axisbelow(True)
+        
+        # Configurar ticks menores para grade mais detalhada
+        ax.minorticks_on()
+        
+        # Configurar espaçamento dos ticks principais
+        ax.xaxis.set_major_locator(MultipleLocator(2.0))
+        ax.yaxis.set_major_locator(MultipleLocator(0.2))
+        
+        # Configurar espaçamento dos ticks menores
+        ax.xaxis.set_minor_locator(MultipleLocator(1.0))
+        ax.yaxis.set_minor_locator(MultipleLocator(0.2))
         
         # Configurar limites dos eixos
         ax.set_xlim(left=0)
         ax.set_ylim(bottom=0, top=1)
         
         # Configurar tamanho dos ticks com fonte acadêmica
-        ax.tick_params(axis='both', which='major', labelsize=12)
+        ax.tick_params(axis='both', which='major', labelsize=18)
         for label in ax.get_xticklabels() + ax.get_yticklabels():
             label.set_fontfamily('serif')
         
@@ -437,12 +492,13 @@ def generate_jg_vs_alpha_plot(df, sheet_name):
         jl_legend_elements = []
         for i, jl in enumerate(jl_series):
             color = colors[i % len(colors)]
-            jl_legend_elements.append(plt.Line2D([0], [0], marker='o', color=color, 
-                                               markersize=8, label=f'j_L = {jl:.1f} m/s'))
-        
+            print(i)
+            line_style = line_styles[i % len(line_styles)]
+            jl_legend_elements.append(plt.Line2D([0], [0], color='black', linestyle=line_style, marker=vec_s_lines[i], mfc='silver',
+                                               markersize=10, label=rf'$j_{{l}}$ = {jl:.1f} m/s'))
         # Criar duas legendas
         ax.legend(handles=jl_legend_elements + legend_elements, 
-                 loc='upper left', frameon=True, fancybox=True, shadow=True, fontsize=10,
+                 loc='lower right', frameon=True, fancybox=True, shadow=True, fontsize=18,
                  prop={'family': 'serif'})
         
         # Ajustar layout
