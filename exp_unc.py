@@ -10,13 +10,13 @@ import sys
 ####################################################################################################################################################
 #                                            INPUTS
 ####################################################################################################################################################
-file_path = 'data_example/example/AWU90/AWU90P01/AWU90P01' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
+file_path = 'C:/Users/User/Documents/LEMI/FSC2_pc/2. Air-Water Tests/2. Air-Water Tests/AWD45/AWD45P08/AWD45P08' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
 
 L = 1.70         # m comprimento entre as tomadas de diferencial de pressão
 
 # Valores de calibração do densitômetro IMPORTANTE
-I_g = 252883                     # Insira a intensidade padrão para o gás (Calibração do densitômetro)
-I_f = 151287                      # Insira a intensidade padrão para o líquido (Calibração do densitômetro)
+I_g = 248466                     # Insira a intensidade padrão para o gás (Calibração do densitômetro)
+I_f = 147950                      # Insira a intensidade padrão para o líquido (Calibração do densitômetro)
 
 sensor_Yokogawa = 'PDT-M-0101D-30Kpa_mA'
 sensor_Endress = 'PDT-M-0101-40kPa_mA'
@@ -26,8 +26,8 @@ sensor_Endress = 'PDT-M-0101-40kPa_mA'
 colunas_analise = [
     [sensor_Yokogawa, r'\Delta P_{30\,kPa} / L', r'[Pa/m]'],
     ['Alpha', r'\alpha', r''],
-    ['J Agua corrigido', r'J_{water}', r'[m/s]'],
-    ['J Ar corrigido', r'J_{air}', r'[m/s]'],
+    ['J_Water', r'J_{water}', r'[m/s]'],
+    ['J_Air', r'J_{air}', r'[m/s]'],
     ['FT-O-0301', r'Q_{air}', r'[m³/h]'],
     ['PIT-M-0101', r'Gauge\ Pressure', r'[Bar]'],
     ['TIT-M-0101', r'Temperature', r'[°C]'],
@@ -157,10 +157,6 @@ def read_file(file_path: str):
                      na_values=[''],
                      encoding='utf-8',
                      names=column_names)
-    ###########CUIDADO HARD CODE CORREÇÃO DO J###############
-    df['J Ar corrigido'] = df['J Ar'] * (1 - 0.06675) 
-    df['J Agua corrigido'] = df['J Agua'] * (1 - 0.06675) 
-    ###########CUIDADO HARD CODE CORREÇÃO DO J###############
     return df, data_teste
 
 def format_filename(alias: str, unit: str) -> str:
@@ -200,13 +196,13 @@ def uncertainties_calc(resumo_df,window_df):
     udP = 0.00055*span_yokogawa
     dP_mean = np.mean(window_df[sensor_Yokogawa])
     dP = unc.ufloat(dP_mean,udP)
-    # print(sensor_Yokogawa)
-    # print(f'dP: {dP:.3f}')
+    print(sensor_Yokogawa)
+    print(f'dP: {dP:.3f}')
 
     # Incerteza de Alpha estimada
-    uAlpha = 0.01667 #0.015
+    uAlpha = resumo_df['Alpha'].iloc[0] * 0.05 # Padrão de 5 % da média do alpha
     Alpha = unc.ufloat(resumo_df['Alpha'].iloc[0],uAlpha)
-    # print('Alpha: ', Alpha)
+    print('Alpha: ', Alpha)
 
     T_mean = resumo_df['TIT-M-0101'].iloc[0]
     uT = 0.15 + 0.02*T_mean
@@ -427,30 +423,30 @@ def save_results(df: pd.DataFrame, coluna_escolhida: str, start_idx: int, end_id
     
     resumo_dict = dict(zip(colunas_corrigidas, medias_corrigidas))
 
-    # Calcular rho_agua médio na janela
+    # Calcular rho_liquido médio na janela
     try:
         if 'TIT-M-0101' in window_data.columns:
-            temp_agua_celsius = window_data['TIT-M-0101']
-            temp_agua_k = temp_agua_celsius + 273.15
-            rho_agua_vals = [PropsSI('D', 'T', t, 'P', 101325, 'Water') for t in temp_agua_k]
-            rho_agua_medio = np.mean(rho_agua_vals)
+            temp_liquido_celsius = window_data['TIT-M-0101']
+            temp_liquido_k = temp_liquido_celsius + 273.15
+            rho_liquido_vals = [PropsSI('D', 'T', t, 'P', 101325, 'Water') for t in temp_liquido_k]
+            rho_liquido_medio = np.mean(rho_liquido_vals)
         else:
-            rho_agua_medio = 1000
+            rho_liquido_medio = 1000
     except Exception as e:
-        rho_agua_medio = 1000
+        rho_liquido_medio = 1000
 
-    # Inserir rho_agua logo após rho_g
+    # Inserir rho_liquido logo após rho_g
     if 'rho_g' in resumo_dict:
         items = list(resumo_dict.items())
         idx = [i for i, (k, v) in enumerate(items) if k == 'rho_g']
         if idx:
             insert_pos = idx[0] + 1
-            items.insert(insert_pos, ('rho_agua', rho_agua_medio))
+            items.insert(insert_pos, ('rho_liquido', rho_liquido_medio))
             resumo_dict = dict(items)
         else:
-            resumo_dict['rho_agua'] = rho_agua_medio
+            resumo_dict['rho_liquido'] = rho_liquido_medio
     else:
-        resumo_dict['rho_agua'] = rho_agua_medio
+        resumo_dict['rho_liquido'] = rho_liquido_medio
 
     resumo_df = pd.DataFrame([resumo_dict])
     
@@ -675,12 +671,12 @@ def calc_frictional_pressure_gradient(df, colunas, start_idx, end_idx, best_wind
         rho_ar = pd.Series(rho_ar, index=pressao_ar_pa.index)
     
         try:
-            temp_agua_celsius = df['TIT-M-0101'].iloc[start_idx:end_idx]
-            temp_agua_k = temp_agua_celsius + 273.15
-            rho_agua = [PropsSI('D', 'T', t, 'P', 101325, 'Water') for t in temp_agua_k]
-            rho_agua = pd.Series(rho_agua, index=temp_agua_celsius.index)
+            temp_liquido_celsius = df['TIT-M-0101'].iloc[start_idx:end_idx]
+            temp_liquido_k = temp_liquido_celsius + 273.15
+            rho_liquido = [PropsSI('D', 'T', t, 'P', 101325, 'Water') for t in temp_liquido_k]
+            rho_liquido = pd.Series(rho_liquido, index=temp_liquido_celsius.index)
         except Exception as e:
-            rho_agua = 1000
+            rho_liquido = 1000
 
     except KeyError as e:
         rho_ar = None
@@ -694,12 +690,12 @@ def calc_frictional_pressure_gradient(df, colunas, start_idx, end_idx, best_wind
         if coluna_pdt_nome == sensor_Yokogawa:
             rho_tubbing = rho_s
         else:
-            rho_tubbing = rho_agua
+            rho_tubbing = rho_liquido
         
         delta_p_prime = df[coluna_pdt_nome].iloc[start_idx:end_idx]
         
-        termo_gravitacional = ((1-alpha_series)*rho_agua + alpha_series*rho_ar - rho_tubbing) * g * np.sin(theta_rad)
-        dP_dz_gravitacional = ((1-alpha_series)*rho_agua + alpha_series*rho_ar) * g * np.sin(theta_rad)
+        termo_gravitacional = ((1-alpha_series)*rho_liquido + alpha_series*rho_ar - rho_tubbing) * g * np.sin(theta_rad)
+        dP_dz_gravitacional = ((1-alpha_series)*rho_liquido + alpha_series*rho_ar) * g * np.sin(theta_rad)
 
         if direction in ['Upward', 'Horizontal']:
             dP_F_over_dz_series = (delta_p_prime / L) - termo_gravitacional
