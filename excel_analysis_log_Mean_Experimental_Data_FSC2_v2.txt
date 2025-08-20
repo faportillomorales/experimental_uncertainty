@@ -1,5 +1,5 @@
 Análise do arquivo: data_example/example/Mean_Experimental_Data_FSC2_v2.xlsx
-Data/hora: 2025-08-18 17:23:02.040378
+Data/hora: 2025-08-19 14:44:52.260540
 
 Dimensões: (16, 25)
 Colunas: ['ID', 'Point', 'Inclination (Degrees)', 'Rig configuration', 'jG\n', 'jL\n', 'α\n', 'Uα', 'dp/dz_F\n', 'Udp/dz_F ', 'dp/dz_G\n', 'Udp/dz_G ', 'dp/dz_T', 'Udp/dz_T ', 'Flow Pattern', 'Slug Freq. ', 'Temp. ', 'Gauge Pressure\n', nan, 'Year/Month', 'File name', 'Densotimeter calibration', 'Window time', 'Pressure sensor', 'Experimentalist']
