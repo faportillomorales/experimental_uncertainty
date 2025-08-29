@@ -31,7 +31,8 @@ colunas_analise = [
     ['FT-O-0301', r'Q_{air}', r'[m³/h]'],
     ['PIT-M-0101', r'Gauge\ Pressure', r'[Bar]'],
     ['TIT-M-0101', r'Temperature', r'[°C]'],
-    ['rho_g', r'\rho_{air}', r'[kg/m³]']
+    ['rho_g', r'\rho_{air}', r'[kg/m³]'],
+    ['rho_g_parede', r'\rho_{air} \, line', r'[kg/m³]']
 ]
 ####################################################################################################################################################
 #       '                                   END INPUTS
@@ -428,7 +429,11 @@ def save_results(df: pd.DataFrame, coluna_escolhida: str, start_idx: int, end_id
         if 'TIT-M-0101' in window_data.columns:
             temp_liquido_celsius = window_data['TIT-M-0101']
             temp_liquido_k = temp_liquido_celsius + 273.15
-            rho_liquido_vals = [PropsSI('D', 'T', t, 'P', 101325, 'Water') for t in temp_liquido_k]
+            if fluid_1 or fluid_2 == 'Water':
+                rho_liquido_vals = [PropsSI('D', 'T', t, 'P', 101325, 'Water') for t in temp_liquido_k]
+            elif fluid_1 or fluid_2 == 'Oil':
+                rho_liquido_vals = -0.65178*temp_liquido_celsius +879.76961 
+
             rho_liquido_medio = np.mean(rho_liquido_vals)
         else:
             rho_liquido_medio = 1000
@@ -661,25 +666,41 @@ def calc_frictional_pressure_gradient(df, colunas, start_idx, end_idx, best_wind
     indices_pdt = [i for i, col in enumerate(colunas) if col[0].startswith("PDT")]
 
     try:
-        pressao_ar_bar = df['PIT-M-0101'].iloc[start_idx:end_idx]
-        temp_ar_celsius = df['TIT-M-0101'].iloc[start_idx:end_idx]
+        if fluid_1 or fluid_2 == 'Air':
+            pressao_gas_bar = df['PIT-M-0101'].iloc[start_idx:end_idx]
+            temp_gas_celsius = df['TIT-M-0101'].iloc[start_idx:end_idx]
+            
+            pressao_gas_parede_bar = df['PIT-A-0301'].iloc[start_idx:end_idx]
+            temp_gas_parede_celsius = df['TIT-A-0301'].iloc[start_idx:end_idx]
+        elif fluid_1 or fluid_2 == 'SF6':
+            print('SF6 not implemented yet')
+            exit()
+       
+        pressao_gas_pa = (pressao_gas_bar + 1) * 1e5
+        temp_gas_k = temp_gas_celsius + 273.15
         
-        pressao_ar_pa = (pressao_ar_bar + 1) * 1e5
-        temp_ar_k = temp_ar_celsius + 273.15
+        pressao_gas_parede_pa = (pressao_gas_parede_bar + 1) * 1e5
+        temp_gas_parede_k = temp_gas_parede_celsius + 273.15
         
-        rho_ar = [PropsSI('D', 'P', p, 'T', t, 'Air') for p, t in zip(pressao_ar_pa, temp_ar_k)]
-        rho_ar = pd.Series(rho_ar, index=pressao_ar_pa.index)
+        rho_gas = [PropsSI('D', 'P', p, 'T', t, 'Air') for p, t in zip(pressao_gas_pa, temp_gas_k)]
+        rho_gas_parede = [PropsSI('D', 'P', p, 'T', t, 'Air') for p, t in zip(pressao_gas_parede_pa, temp_gas_parede_k)]
+        rho_gas = pd.Series(rho_gas, index=pressao_gas_pa.index)
+        rho_gas_parede = pd.Series(rho_gas_parede, index=pressao_gas_parede_pa.index)
     
         try:
-            temp_liquido_celsius = df['TIT-M-0101'].iloc[start_idx:end_idx]
-            temp_liquido_k = temp_liquido_celsius + 273.15
-            rho_liquido = [PropsSI('D', 'T', t, 'P', 101325, 'Water') for t in temp_liquido_k]
-            rho_liquido = pd.Series(rho_liquido, index=temp_liquido_celsius.index)
+            if fluid_1 or fluid_2 == 'Water':
+                temp_liquido_celsius = df['TIT-M-0101'].iloc[start_idx:end_idx]
+                temp_liquido_k = temp_liquido_celsius + 273.15
+                rho_liquido = [PropsSI('D', 'T', t, 'P', 101325, 'Water') for t in temp_liquido_k]
+                rho_liquido = pd.Series(rho_liquido, index=temp_liquido_celsius.index)
+            elif fluid_1 or fluid_2 == 'Oil':
+                temp_liquido_celsius = df['TIT-M-0101'].iloc[start_idx:end_idx]
+                rho_liquido = -0.65178*temp_liquido_celsius +879.76961 
         except Exception as e:
             rho_liquido = 1000
 
     except KeyError as e:
-        rho_ar = None
+        rho_gas = None
 
     dP_F_df = pd.DataFrame()
 
@@ -694,8 +715,8 @@ def calc_frictional_pressure_gradient(df, colunas, start_idx, end_idx, best_wind
         
         delta_p_prime = df[coluna_pdt_nome].iloc[start_idx:end_idx]
         
-        termo_gravitacional = ((1-alpha_series)*rho_liquido + alpha_series*rho_ar - rho_tubbing) * g * np.sin(theta_rad)
-        dP_dz_gravitacional = ((1-alpha_series)*rho_liquido + alpha_series*rho_ar) * g * np.sin(theta_rad)
+        termo_gravitacional = ((1-alpha_series)*rho_liquido + alpha_series*rho_gas - rho_tubbing) * g * np.sin(theta_rad)
+        dP_dz_gravitacional = ((1-alpha_series)*rho_liquido + alpha_series*rho_gas) * g * np.sin(theta_rad)
 
         if direction in ['Upward', 'Horizontal']:
             dP_F_over_dz_series = (delta_p_prime / L) - termo_gravitacional
@@ -757,7 +778,7 @@ def check_required_columns(df: pd.DataFrame, colunas_analise: list):
     """
     colunas_faltantes = []
     
-    colunas_calculadas = ['Alpha', 'rho_g', 'J Ar corrigido']
+    colunas_calculadas = ['Alpha', 'rho_g', 'rho_g_parede']
     
     for coluna_info in colunas_analise:
         nome_coluna = coluna_info[0]
@@ -905,14 +926,25 @@ if __name__ == "__main__":
 
     if any(col[0] == 'rho_g' for col in colunas_analise):
         try:
-            pressao_ar_bar_full = df['PIT-M-0101']
-            temp_ar_celsius_full = df['TIT-M-0101']
-            pressao_ar_pa_full = (pressao_ar_bar_full + 1) * 1e5
-            temp_ar_k_full = temp_ar_celsius_full + 273.15
-            rho_g_full = [PropsSI('D', 'P', p, 'T', t, 'Air') for p, t in zip(pressao_ar_pa_full, temp_ar_k_full)]
+            pressao_gas_bar_full = df['PIT-M-0101']
+            temp_gas_celsius_full = df['TIT-M-0101']
+            pressao_gas_pa_full = (pressao_gas_bar_full + 1) * 1e5
+            temp_gas_k_full = temp_gas_celsius_full + 273.15
+            rho_g_full = [PropsSI('D', 'P', p, 'T', t, 'Air') for p, t in zip(pressao_gas_pa_full, temp_gas_k_full)]
             df['rho_g'] = rho_g_full
         except Exception as e:
-            df['rho_g'] = (pressao_ar_pa_full) / (8.314 * temp_ar_k_full)
+            df['rho_g'] = (pressao_gas_pa_full) / (8.314 * temp_gas_k_full)
+    
+    if any(col[0] == 'rho_g_parede' for col in colunas_analise):
+        try:
+            pressao_gas_parede_bar_full = df['PIT-A-0301']
+            temp_gas_parede_celsius_full = df['TIT-A-0301']
+            pressao_gas_parede_pa_full = (pressao_gas_parede_bar_full + 1) * 1e5
+            temp_gas_parede_k_full = temp_gas_parede_celsius_full + 273.15
+            rho_g_parede_full = [PropsSI('D', 'P', p, 'T', t, 'Air') for p, t in zip(pressao_gas_parede_pa_full, temp_gas_parede_k_full)]
+            df['rho_g_parede'] = rho_g_parede_full
+        except Exception as e:
+            df['rho_g_parede'] = (pressao_gas_parede_pa_full) / (8.314 * temp_gas_parede_k_full)
 
     dP_F_df_full = calc_frictional_pressure_gradient(df, colunas_analise, 0, len(df), len(df), alpha_df_full['Alpha'])
     for col in dP_F_df_full.columns:
