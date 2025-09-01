@@ -10,29 +10,35 @@ import sys
 ####################################################################################################################################################
 #                                            INPUTS
 ####################################################################################################################################################
-file_path = 'C:/Users/User/Documents/LEMI/FSC2_pc/2. Air-Water Tests/2. Air-Water Tests/AWD45/AWD45P08/AWD45P08' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
+file_path = 'C:/FSC2/TESTES DE OLEO/AOH00/AOH00T02/AOH00T02-teste' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
 
 L = 1.70         # m comprimento entre as tomadas de diferencial de pressão
 
 # Valores de calibração do densitômetro IMPORTANTE
-I_g = 248466                     # Insira a intensidade padrão para o gás (Calibração do densitômetro)
-I_f = 147950                      # Insira a intensidade padrão para o líquido (Calibração do densitômetro)
+# Serão lidos automaticamente da primeira linha da coluna Comment
+I_G = None  # Será preenchido automaticamente
+I_L = None  # Será preenchido automaticamente
 
-sensor_Yokogawa = 'PDT-M-0101D-30Kpa_mA'
-sensor_Endress = 'PDT-M-0101-40kPa_mA'
+sensor_Yokogawa = 'PDT-M-0101D-30kPa'
+sensor_Endress = 'PDT-M-0101-40kPa(Pa)'
 
+pressao_mesa = 'PIT-M-0101(bar)'
+temperatura_mesa = 'TIT-M-0101(C)'
+
+pressao_parede = 'PIT-A-0301(bar)'
+temperatura_parede = 'TIT-A-0301(C)'
 ### Colunas de interesse -> Insira o nome das colunas a plotar e avaliar do arquivo .dat
 # Lista de colunas para análise: [nome_coluna, apelido, unidade]
 colunas_analise = [
     [sensor_Yokogawa, r'\Delta P_{30\,kPa} / L', r'[Pa/m]'],
     ['Alpha', r'\alpha', r''],
-    ['J_Water', r'J_{water}', r'[m/s]'],
-    ['J_Air', r'J_{air}', r'[m/s]'],
-    ['FT-O-0301', r'Q_{air}', r'[m³/h]'],
-    ['PIT-M-0101', r'Gauge\ Pressure', r'[Bar]'],
-    ['TIT-M-0101', r'Temperature', r'[°C]'],
+    ['J_Oil(m/s)', r'J_{oil}', r'[m/s]'],
+    ['J_Air(m/s)', r'J_{air}', r'[m/s]'],
+    ['FT-O-0301(m3h)', r'Q_{oil}', r'[m³/h]'],
+    [pressao_mesa, r'Gauge\ Pressure', r'[Bar]'],
+    [temperatura_mesa, r'Temperature', r'[°C]'],
     ['rho_g', r'\rho_{air}', r'[kg/m³]'],
-    ['rho_g_parede', r'\rho_{air} \, line', r'[kg/m³]']
+    ['rho_g_parede', r'\rho_{air-parede}', r'[kg/m³]']
 ]
 ####################################################################################################################################################
 #       '                                   END INPUTS
@@ -154,11 +160,42 @@ def read_file(file_path: str):
     df = pd.read_csv(file_path, 
                      sep='\t',
                      skiprows=header_end_idx+1,
-                     decimal=',',
+                     decimal='.',
                      na_values=[''],
                      encoding='utf-8',
                      names=column_names)
-    return df, data_teste
+    
+    # Extrair I_G e I_L da primeira linha da coluna Comment
+    i_g = None
+    i_l = None
+    
+    if 'Comment' in df.columns and len(df) > 0:
+        first_comment = str(df['Comment'].iloc[0])
+        if 'I_G =' in first_comment and 'I_L =' in first_comment:
+            try:
+                # Extrair I_G
+                ig_start = first_comment.find('I_G =') + 5  # +5 para pular "I_G ="
+                ig_end = first_comment.find('/', ig_start)
+                if ig_end == -1:
+                    ig_end = len(first_comment)
+                i_g = float(first_comment[ig_start:ig_end])
+                
+                # Extrair I_L
+                il_start = first_comment.find('I_L =') + 5  # +5 para pular "I_L ="
+                il_end = first_comment.find('/', il_start)
+                if il_end == -1:
+                    il_end = len(first_comment)
+                i_l = float(first_comment[il_start:il_end])
+                
+                print(f"Valores extraídos da coluna Comment:")
+                print(f"I_G = {i_g}")
+                print(f"I_L = {i_l}")
+                
+            except (ValueError, IndexError) as e:
+                print(f"Erro ao extrair I_G e I_L da coluna Comment: {e}")
+                print(f"Conteúdo da primeira linha: {first_comment}")
+    
+    return df, data_teste, i_g, i_l
 
 def format_filename(alias: str, unit: str) -> str:
     """
@@ -205,28 +242,33 @@ def uncertainties_calc(resumo_df,window_df):
     Alpha = unc.ufloat(resumo_df['Alpha'].iloc[0],uAlpha)
     print('Alpha: ', Alpha)
 
-    T_mean = resumo_df['TIT-M-0101'].iloc[0]
+    T_mean = resumo_df[temperatura_mesa].iloc[0]
     uT = 0.15 + 0.02*T_mean
     T = unc.ufloat(T_mean,uT)
     T_abs = T + 273.15
     # print('T: ', T)
 
-    P_mean = (resumo_df['PIT-M-0101'].iloc[0] + 1) * 1E5            #Absolute pressure in Pa
+    P_mean = (resumo_df[pressao_mesa].iloc[0] + 1) * 1E5            #Absolute pressure in Pa
     uP = 0.0025*P_mean
     P = unc.ufloat(P_mean,uP)
-    # print('P: ', P)
+    print('P: ', P)
     
     # Cálculo da incerteza da densidade do gás
     M_ar = 28.96e-3 #[kg/kmol]			    # Massa molecular do ar em [kg/kmol] 
     R = 8.314 #[kJ/kmolK]				    # Constante universal dos gases [kJ/kmol.K] 
     rho_G = (P * M_ar) / (R * T_abs)	# Densidade média do ar em [kg/m^3] 
     u_rho_g = rho_G.std_dev
-    # print('u_rho_g: ', rho_G)
+    print('u_rho_g: ', rho_G)
 
     # Cálcuo da incerteza da densidade do líquido
-    rho_L = - 0.0042*(T**2) - 0.0529*T + 1000.9		# Média da densidade do líquido
+    if fluid_2 == 'Water':
+        rho_L = - 0.0042*(T**2) - 0.0529*T + 1000.9		# Média da densidade do líquido
+        print('rho_agua')
+    elif fluid_2 == 'Oil':
+        rho_L = -0.65178*T + 879.76961
+        print('rho_óleo')
     u_rho_l = rho_L.std_dev
-    # print('u_rho_l: ', rho_L)
+    print('u_rho_l: ', rho_L)
 
     rho_tubbing = rho_s
     # print('rho_tubbing: ', rho_tubbing)
@@ -240,7 +282,7 @@ def uncertainties_calc(resumo_df,window_df):
 
 
     dPg_dz = ((1-Alpha)*rho_L + Alpha*rho_G) * g * np.sin(theta_rad)
-    # print(f'dPg_dz: {dPg_dz:.3f}')
+    
     # Cálculo da incerteza do friccional
             
     if direction in ['Upward', 'Horizontal']:
@@ -251,8 +293,9 @@ def uncertainties_calc(resumo_df,window_df):
         dPf_dz = -(dP/L_) + ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
         dPt_dz = -(abs(dPf_dz)) + dPg_dz
     
-    # print(f'dPf_dz: {dPf_dz:.3f}')
-    # print(f'dPt_dz: {dPt_dz:.3f}')
+    print(f'dPf_dz: {dPf_dz:.3f}')
+    print(f'dPg_dz: {dPg_dz:.3f}')
+    print(f'dPt_dz: {dPt_dz:.3f}')
     
     # Alocando as incetezas
     udPf_dz = dPf_dz.std_dev
@@ -345,8 +388,8 @@ def save_results(df: pd.DataFrame, coluna_escolhida: str, start_idx: int, end_id
         "Fluido 2": fluid_2,
         "Direção do escoamento": direction,
         "Inclinação (theta)": f"{theta}°",
-        "Intensidade do gas densitometro (Ig)": I_g,
-        "Intensidade do fluido densitometro (If)": I_f,
+        "Intensidade do gas densitometro (Ig)": I_G,
+        "Intensidade do fluido densitometro (If)": I_L,
     }
     
     if escolha_janela == '1':
@@ -375,13 +418,21 @@ def save_results(df: pd.DataFrame, coluna_escolhida: str, start_idx: int, end_id
     
     window_data = df.iloc[start_idx:end_idx]
     
-    medias_janela = window_data.mean()
+    # Excluir colunas não numéricas do cálculo da média
+    colunas_numericas = window_data.select_dtypes(include=[np.number]).columns
+    # Remover a coluna Comment se existir
+    if 'Comment' in colunas_numericas:
+        colunas_numericas = colunas_numericas.drop('Comment')
+    medias_janela = window_data[colunas_numericas].mean()
     
     colunas_corrigidas = []
     coluna_gravitacional = None
     
     for col in df.columns:
-        if col.startswith('dP_F/dz dP_dz_total_'):
+        # Pular colunas não numéricas como 'Comment'
+        if col == 'Comment':
+            continue
+        elif col.startswith('dP_F/dz dP_dz_total_'):
             colunas_corrigidas.append(col.replace('dP_F/dz dP_dz_total_', 'dP_dz_total_'))
         elif col.startswith('dP_F/dz dP_dz_gravitacional'):
             coluna_gravitacional = 'dP_dz_gravitacional'
@@ -426,12 +477,12 @@ def save_results(df: pd.DataFrame, coluna_escolhida: str, start_idx: int, end_id
 
     # Calcular rho_liquido médio na janela
     try:
-        if 'TIT-M-0101' in window_data.columns:
-            temp_liquido_celsius = window_data['TIT-M-0101']
+        if temperatura_mesa in window_data.columns:
+            temp_liquido_celsius = window_data[temperatura_mesa]
             temp_liquido_k = temp_liquido_celsius + 273.15
-            if fluid_1 or fluid_2 == 'Water':
+            if fluid_2 == 'Water':
                 rho_liquido_vals = [PropsSI('D', 'T', t, 'P', 101325, 'Water') for t in temp_liquido_k]
-            elif fluid_1 or fluid_2 == 'Oil':
+            elif fluid_2 == 'Oil':
                 rho_liquido_vals = -0.65178*temp_liquido_celsius +879.76961 
 
             rho_liquido_medio = np.mean(rho_liquido_vals)
@@ -458,7 +509,10 @@ def save_results(df: pd.DataFrame, coluna_escolhida: str, start_idx: int, end_id
     window_df = pd.DataFrame()
 
     for col in colunas_corrigidas:
-        if col == 'dP_dz_gravitacional':
+        # Pular a coluna Comment
+        if col == 'Comment':
+            continue
+        elif col == 'dP_dz_gravitacional':
             window_df[col] = window_data['dP_F/dz dP_dz_gravitacional']
         elif col.startswith('dP_dz_total_'):
             window_df[col] = dP_dz_total_values[col]
@@ -645,8 +699,8 @@ def calc_alpha(df, start_idx, end_idx):
     Determina a fração de vazio (alpha) na mistura a partir dos dados do densitômetro na janela selecionada.
     Retorna um DataFrame contendo a série temporal de Alpha na janela.
     """
-    dados_densitometro = df['Densitometro'].iloc[start_idx:end_idx]
-    alpha_series = np.log(dados_densitometro / I_f) / np.log(I_g / I_f)
+    dados_densitometro = df['I_Densitometer'].iloc[start_idx:end_idx]
+    alpha_series = np.log(dados_densitometro / I_L) / np.log(I_G / I_L)
     
     alpha_df = pd.DataFrame({
         'X_Value': df['X_Value'].iloc[start_idx:end_idx],
@@ -667,11 +721,11 @@ def calc_frictional_pressure_gradient(df, colunas, start_idx, end_idx, best_wind
 
     try:
         if fluid_1 or fluid_2 == 'Air':
-            pressao_gas_bar = df['PIT-M-0101'].iloc[start_idx:end_idx]
-            temp_gas_celsius = df['TIT-M-0101'].iloc[start_idx:end_idx]
+            pressao_gas_bar = df[pressao_mesa].iloc[start_idx:end_idx]
+            temp_gas_celsius = df[temperatura_mesa].iloc[start_idx:end_idx]
             
-            pressao_gas_parede_bar = df['PIT-A-0301'].iloc[start_idx:end_idx]
-            temp_gas_parede_celsius = df['TIT-A-0301'].iloc[start_idx:end_idx]
+            pressao_gas_parede_bar = df[pressao_parede].iloc[start_idx:end_idx]
+            temp_gas_parede_celsius = df[temperatura_parede].iloc[start_idx:end_idx]
         elif fluid_1 or fluid_2 == 'SF6':
             print('SF6 not implemented yet')
             exit()
@@ -688,13 +742,13 @@ def calc_frictional_pressure_gradient(df, colunas, start_idx, end_idx, best_wind
         rho_gas_parede = pd.Series(rho_gas_parede, index=pressao_gas_parede_pa.index)
     
         try:
-            if fluid_1 or fluid_2 == 'Water':
-                temp_liquido_celsius = df['TIT-M-0101'].iloc[start_idx:end_idx]
+            if fluid_2 == 'Water':
+                temp_liquido_celsius = df[temperatura_mesa].iloc[start_idx:end_idx]
                 temp_liquido_k = temp_liquido_celsius + 273.15
                 rho_liquido = [PropsSI('D', 'T', t, 'P', 101325, 'Water') for t in temp_liquido_k]
                 rho_liquido = pd.Series(rho_liquido, index=temp_liquido_celsius.index)
-            elif fluid_1 or fluid_2 == 'Oil':
-                temp_liquido_celsius = df['TIT-M-0101'].iloc[start_idx:end_idx]
+            elif fluid_2 == 'Oil':
+                temp_liquido_celsius = df[temperatura_mesa].iloc[start_idx:end_idx]
                 rho_liquido = -0.65178*temp_liquido_celsius +879.76961 
         except Exception as e:
             rho_liquido = 1000
@@ -903,7 +957,19 @@ def plot_pressure_gradients(df: pd.DataFrame, dP_F_df: pd.DataFrame, start_idx: 
 
 if __name__ == "__main__":
 
-    df, data_teste = read_file(file_path)
+    df, data_teste, i_g_extracted, i_l_extracted = read_file(file_path)
+    
+    # Atualizar as variáveis globais com os valores extraídos
+    if i_g_extracted is not None:
+        I_G = i_g_extracted
+    if i_l_extracted is not None:
+        I_L = i_l_extracted
+    
+    # Verificar se os valores foram extraídos corretamente
+    if I_G is None or I_L is None:
+        print("ERRO: Não foi possível extrair I_G e I_L da coluna Comment.")
+        print("Verifique se a primeira linha da coluna Comment contém: I_G =XXXXX/I_L =XXXXX")
+        sys.exit(1)
 
     if not check_required_columns(df, colunas_analise):
         sys.exit(1)
@@ -926,25 +992,31 @@ if __name__ == "__main__":
 
     if any(col[0] == 'rho_g' for col in colunas_analise):
         try:
-            pressao_gas_bar_full = df['PIT-M-0101']
-            temp_gas_celsius_full = df['TIT-M-0101']
+            pressao_gas_bar_full = df[pressao_mesa]
+            temp_gas_celsius_full = df[temperatura_mesa]
             pressao_gas_pa_full = (pressao_gas_bar_full + 1) * 1e5
             temp_gas_k_full = temp_gas_celsius_full + 273.15
             rho_g_full = [PropsSI('D', 'P', p, 'T', t, 'Air') for p, t in zip(pressao_gas_pa_full, temp_gas_k_full)]
             df['rho_g'] = rho_g_full
         except Exception as e:
-            df['rho_g'] = (pressao_gas_pa_full) / (8.314 * temp_gas_k_full)
+            # Garantir que os dados são numéricos
+            pressao_gas_pa_full_numeric = pd.to_numeric(pressao_gas_pa_full, errors='coerce')
+            temp_gas_k_full_numeric = pd.to_numeric(temp_gas_k_full, errors='coerce')
+            df['rho_g'] = (pressao_gas_pa_full_numeric) / (8.314 * temp_gas_k_full_numeric)
     
     if any(col[0] == 'rho_g_parede' for col in colunas_analise):
         try:
-            pressao_gas_parede_bar_full = df['PIT-A-0301']
-            temp_gas_parede_celsius_full = df['TIT-A-0301']
+            pressao_gas_parede_bar_full = df[pressao_parede]
+            temp_gas_parede_celsius_full = df[temperatura_parede]
             pressao_gas_parede_pa_full = (pressao_gas_parede_bar_full + 1) * 1e5
             temp_gas_parede_k_full = temp_gas_parede_celsius_full + 273.15
             rho_g_parede_full = [PropsSI('D', 'P', p, 'T', t, 'Air') for p, t in zip(pressao_gas_parede_pa_full, temp_gas_parede_k_full)]
             df['rho_g_parede'] = rho_g_parede_full
         except Exception as e:
-            df['rho_g_parede'] = (pressao_gas_parede_pa_full) / (8.314 * temp_gas_parede_k_full)
+            # Garantir que os dados são numéricos
+            pressao_gas_parede_pa_full_numeric = pd.to_numeric(pressao_gas_parede_pa_full, errors='coerce')
+            temp_gas_parede_k_full_numeric = pd.to_numeric(temp_gas_parede_k_full, errors='coerce')
+            df['rho_g_parede'] = (pressao_gas_parede_pa_full_numeric) / (8.314 * temp_gas_parede_k_full_numeric)
 
     dP_F_df_full = calc_frictional_pressure_gradient(df, colunas_analise, 0, len(df), len(df), alpha_df_full['Alpha'])
     for col in dP_F_df_full.columns:
