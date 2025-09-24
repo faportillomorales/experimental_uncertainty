@@ -4,24 +4,24 @@ import matplotlib.pyplot as plt
 import os
 from datetime import datetime
 import sys
+from nptdms import TdmsFile
+from scipy import signal
 
 ####################################################################################################################################################
 #                                            INPUTS
 ####################################################################################################################################################
-file_path = 'C:/Users/User/Documents/LEMI/FSC2_pc/2. Air-Water Tests/2. Air-Water Tests/AWH00/AWH00P02/Data/AWH00P02' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
+file_path = 'G:/Meu Drive/LEMI/uncertainties/data_example/example/freq_slug/AOU90P10/AOU90P10_acc.tdms' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
+freq_corte = 20.0  # Frequência de corte do filtro passa-baixa em Hz - MODIFIQUE ESTE VALOR CONFORME NECESSÁRIO
 
-### Colunas de interesse -> Insira o nome das colunas a plotar e avaliar do arquivo .dat
+### Colunas de interesse -> Insira o nome das colunas a plotar e avaliar do arquivo TDMS
 # Lista de colunas para análise: [nome_coluna, apelido, unidade]
 colunas_analise = [
-    ['PDT-M-0101C-3kPa', r'\Delta P_{30\,kPa} / L', r'[Pa/m]'],
-    ['PDT-M-0101-40kPa', r'\Delta P_{40\,kPa} / L', r'[Pa/m]'],
-    ['Alpha', r'\alpha', r''],
-    ['J Agua corrigido', r'J_{water}', r'[m/s]'],
-    ['J Ar corrigido', r'J_{air}', r'[m/s]'],
-    ['FT-A-0302', r'Q_{air}', r'[m³/h]'],
-    ['PIT-M-0101', r'Gauge\ Pressure', r'[Bar]'],
-    ['TIT-M-0101', r'Temperature', r'[°C]'],
-    ['rho_g', r'\rho_{air}', r'[kg/m³]']
+    ["/'Untitled'/'Accel1'", r'Accel1', r'[g]'],
+    ["/'Untitled'/'Accel2'", r'Accel2', r'[g]'],
+    ["/'Untitled'/'Accel3'", r'Accel3', r'[g]'],
+    ["/'Untitled'/'Accel4'", r'Accel4', r'[g]'],
+    ["/'Untitled'/'DP_Validyne'", r'DP\ Validyne', r'[Pa]'],
+    ["/'Untitled'/'PIT-M-301'", r'PIT-M-301', r'[Bar]']
 ]
 
 ####################################################################################################################################################
@@ -30,60 +30,120 @@ colunas_analise = [
 
 def read_file(file_path: str):
     """
-    Lê o arquivo e retorna um DataFrame do pandas.
-    Os dados são lidos a partir do segundo ***End_of_Header***.
-    Os nomes das colunas são lidos da linha após o segundo ***End_of_Header***.
+    Lê o arquivo TDMS e retorna um DataFrame do pandas.
     
     Args:
-        file_path (str): Caminho para o arquivo
+        file_path (str): Caminho para o arquivo TDMS
         
     Returns:
         tuple: (DataFrame com os dados, data do teste experimental)
     """
-    with open(file_path, 'r') as f:
-        lines = f.readlines()
-    
-    data_teste = None
-    primeiro_header_end = False
-    
-    for line in lines:
-        if '***End_of_Header***' in line:
-            primeiro_header_end = True
-            continue
-            
-        if not primeiro_header_end:
-            if 'Date' in line:
-                try:
-                    data = line.strip().split('Date')[1].strip()
-                    partes = data.split('/')
-                    if len(partes) == 3:
-                        data_teste = f"{partes[0]}/{partes[1]}/{partes[2]}"
-                except:
-                    pass
-    
-    header_count = 0
-    header_end_idx = 0
-    for i, line in enumerate(lines):
-        if '***End_of_Header***' in line:
-            header_count += 1
-            if header_count == 2:
-                header_end_idx = i + 1
-                break
-            
-    column_names = [name.strip() for name in lines[header_end_idx].strip().split('\t')]
+    try:
+        # Lê o arquivo TDMS
+        tdms_file = TdmsFile.read(file_path)
+        
+        # Converte para DataFrame
+        df = tdms_file.as_dataframe()
+        
+        # Extrai informações do arquivo
+        data_teste = None
+        try:
+            metadata = tdms_file.read_metadata()
+            if hasattr(metadata, 'description'):
+                data_teste = metadata.description
+        except:
+            pass
+        
+        # Cria coluna de tempo baseada na coluna de tempo do TDMS
+        if "/'Untitled'/'Time'" in df.columns:
+            # Converte timestamps para segundos relativos
+            time_col = df["/'Untitled'/'Time'"]
+            start_time = time_col.iloc[0]
+            df['X_Value'] = (time_col - start_time).dt.total_seconds()
+        else:
+            # Fallback: cria uma coluna de tempo baseada no índice
+            df['X_Value'] = np.arange(len(df)) * 0.1  # Assume 10 Hz de frequência de amostragem
+        
+        # Calcula colunas corrigidas se as colunas originais existirem
+        if 'J Ar' in df.columns:
+            df['J Ar corrigido'] = df['J Ar'] * (1 - 0.06675)
+        if 'J Agua' in df.columns:
+            df['J Agua corrigido'] = df['J Agua'] * (1 - 0.06675)
+        
+        return df, data_teste
+        
+    except Exception as e:
+        print(f"Erro ao ler arquivo TDMS: {e}")
+        print("Tentando ler como arquivo de texto...")
+        
+        # Fallback para arquivo de texto
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+        except UnicodeDecodeError:
+            with open(file_path, 'r', encoding='latin-1') as f:
+                lines = f.readlines()
+        
+        # Procura por marcadores de cabeçalho
+        header_count = 0
+        header_end_idx = 0
+        for i, line in enumerate(lines):
+            if '***End_of_Header***' in line:
+                header_count += 1
+                if header_count == 2:
+                    header_end_idx = i + 1
+                    break
+        
+        if header_end_idx == 0:
+            # Se não encontrar marcadores, assume que os dados começam após algumas linhas
+            header_end_idx = 5
+        
+        column_names = [name.strip() for name in lines[header_end_idx].strip().split('\t')]
+        
+        df = pd.read_csv(file_path, 
+                         sep='\t',
+                         skiprows=header_end_idx+1,
+                         decimal=',',
+                         na_values=[''],
+                         encoding='utf-8',
+                         names=column_names)
+        
+        # Adiciona coluna de tempo se não existir
+        if 'X_Value' not in df.columns:
+            df['X_Value'] = np.arange(len(df)) * 0.1
+        
+        # Calcula colunas corrigidas
+        if 'J Ar' in df.columns:
+            df['J Ar corrigido'] = df['J Ar'] * (1 - 0.06675)
+        if 'J Agua' in df.columns:
+            df['J Agua corrigido'] = df['J Agua'] * (1 - 0.06675)
+        
+        return df, None
 
-    df = pd.read_csv(file_path, 
-                     sep='\t',
-                     skiprows=header_end_idx+1,
-                     decimal=',',
-                     na_values=[''],
-                     encoding='utf-8',
-                     names=column_names)
+def apply_lowpass_filter(data: np.ndarray, fs: float, fc: float, order: int = 4):
+    """
+    Aplica um filtro passa-baixa Butterworth aos dados.
     
-    df['J Ar corrigido'] = df['J Ar'] * (1 - 0.06675) 
-    df['J Agua corrigido'] = df['J Agua'] * (1 - 0.06675) 
+    Args:
+        data (np.ndarray): Dados de entrada
+        fs (float): Frequência de amostragem em Hz
+        fc (float): Frequência de corte em Hz
+        order (int): Ordem do filtro (padrão: 4)
+        
+    Returns:
+        np.ndarray: Dados filtrados
+    """
+    # Normaliza a frequência de corte
+    nyquist = fs / 2
+    normalized_cutoff = fc / nyquist
     
-    return df, data_teste
+    # Projeta o filtro Butterworth
+    b, a = signal.butter(order, normalized_cutoff, btype='low', analog=False)
+    
+    # Aplica o filtro
+    filtered_data = signal.filtfilt(b, a, data)
+    
+    return filtered_data
 
 def check_required_columns(df: pd.DataFrame, colunas_analise: list):
     """
@@ -109,68 +169,177 @@ def check_required_columns(df: pd.DataFrame, colunas_analise: list):
     
     return True
 
-def apply_fft(df: pd.DataFrame, coluna: str, output_dir: str, base_name: str):
+def apply_fft(df: pd.DataFrame, coluna: str, output_dir: str, base_name: str, freq_corte: float):
     """
     Aplica a FFT em uma coluna específica do DataFrame e plota os resultados.
+    Inclui aplicação de filtro passa-baixa.
     
     Args:
         df (pd.DataFrame): DataFrame com os dados
         coluna (str): Nome da coluna para análise
         output_dir (str): Diretório para salvar os resultados
         base_name (str): Nome base para os arquivos de saída
+        freq_corte (float): Frequência de corte do filtro passa-baixa em Hz
     """
     # Obtém os dados da coluna
     y_data = df[coluna].values
     time = df['X_Value'].values
     
-    # Calcula o intervalo de tempo entre amostras
+    # Calcula o intervalo de tempo entre amostras e frequência de amostragem
     dt = np.mean(np.diff(time))
+    fs = 1/dt
     
-    # Aplica a FFT
+    # Aplica filtro passa-baixa
+    y_filtered = apply_lowpass_filter(y_data, fs, freq_corte)
+    
+    # Aplica a FFT no sinal original
     n = len(y_data)
-    fft_result = np.fft.fft(y_data)
+    fft_result_original = np.fft.fft(y_data)
     freqs = np.fft.fftfreq(n, dt)
+    magnitude_original = np.abs(fft_result_original)
     
-    # Calcula a magnitude do espectro
-    magnitude = np.abs(fft_result)
+    # Aplica a FFT no sinal filtrado
+    fft_result_filtered = np.fft.fft(y_filtered)
+    magnitude_filtered = np.abs(fft_result_filtered)
     
-    # Plota o sinal original
-    plt.figure(figsize=(15, 10))
-    plt.subplot(2, 1, 1)
-    plt.plot(time, y_data, 'b-', label='Sinal Original')
-    plt.xlabel('Tempo (s)')
+    # Plota os resultados
+    plt.figure(figsize=(20, 12))
+    
+    # Time series - original vs filtered
+    plt.subplot(3, 2, 1)
+    plt.plot(time, y_data, 'b-', alpha=0.7, label='Original signal', linewidth=0.8)
+    plt.plot(time, y_filtered, 'r-', label=f'Filtered signal (fc={freq_corte} Hz)', linewidth=1.2)
+    plt.xlabel('Time (s)')
     plt.ylabel('Amplitude')
-    plt.title(f'Sinal Original - {coluna}')
-    plt.grid(True)
+    plt.title(f'Time Series - {coluna.split("/")[-1].replace("_", " ")}')
+    plt.grid(True, alpha=0.3)
     plt.legend()
     
-    # Plota o espectro de frequência
-    plt.subplot(2, 1, 2)
-    # Plota apenas a parte positiva do espectro
+    # Time series zoom (first 2 seconds)
+    plt.subplot(3, 2, 2)
+    mask_zoom = time <= 2.0
+    plt.plot(time[mask_zoom], y_data[mask_zoom], 'b-', alpha=0.7, label='Original', linewidth=0.8)
+    plt.plot(time[mask_zoom], y_filtered[mask_zoom], 'r-', label=f'Filtered (fc={freq_corte} Hz)', linewidth=1.2)
+    plt.xlabel('Time (s)')
+    plt.ylabel('Amplitude')
+    plt.title('Zoom - First 2 seconds')
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    
+    # Frequency spectrum - original
+    plt.subplot(3, 2, 3)
     positive_freq_mask = freqs > 0
-    plt.plot(freqs[positive_freq_mask], magnitude[positive_freq_mask], 'r-')
-    plt.xlabel('Frequência (Hz)')
+    plt.plot(freqs[positive_freq_mask], magnitude_original[positive_freq_mask], 'b-', linewidth=0.8)
+    plt.axvline(x=freq_corte, color='r', linestyle='--', alpha=0.7, label=f'Cutoff frequency ({freq_corte} Hz)')
+    plt.xlabel('Frequency (Hz)')
     plt.ylabel('Magnitude')
-    plt.title('Espectro de Frequência')
-    plt.grid(True)
+    plt.title('Original Spectrum')
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.xlim(0, min(fs/2, freq_corte*3))  # Limita até 3x a frequência de corte
+    
+    # Frequency spectrum - filtered
+    plt.subplot(3, 2, 4)
+    plt.plot(freqs[positive_freq_mask], magnitude_filtered[positive_freq_mask], 'r-', linewidth=0.8)
+    plt.axvline(x=freq_corte, color='r', linestyle='--', alpha=0.7, label=f'Cutoff frequency ({freq_corte} Hz)')
+    plt.xlabel('Frequency (Hz)')
+    plt.ylabel('Magnitude')
+    plt.title('Filtered Spectrum')
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.xlim(0, min(fs/2, freq_corte*3))
+    
+    # Spectra comparison
+    plt.subplot(3, 2, 5)
+    plt.plot(freqs[positive_freq_mask], magnitude_original[positive_freq_mask], 'b-', alpha=0.7, label='Original', linewidth=0.8)
+    plt.plot(freqs[positive_freq_mask], magnitude_filtered[positive_freq_mask], 'r-', label='Filtered', linewidth=0.8)
+    plt.axvline(x=freq_corte, color='g', linestyle='--', alpha=0.7, label=f'fc = {freq_corte} Hz')
+    plt.xlabel('Frequency (Hz)')
+    plt.ylabel('Magnitude')
+    plt.title('Spectra Comparison')
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.xlim(0, min(fs/2, freq_corte*3))
+
+    # Frequências dominantes (maior energia)
+    freqs_pos = freqs[positive_freq_mask]
+    mag_orig_pos = magnitude_original[positive_freq_mask]
+    mag_filt_pos = magnitude_filtered[positive_freq_mask]
+    if len(freqs_pos) > 0:
+        idx_dom_orig = int(np.argmax(mag_orig_pos))
+        idx_dom_filt = int(np.argmax(mag_filt_pos))
+        f_dom_orig = float(freqs_pos[idx_dom_orig])
+        f_dom_filt = float(freqs_pos[idx_dom_filt])
+        # imprime no terminal para indicar frequência de passagem (pistonado)
+        print(f"\nFrequência dominante (maior energia) - original: {f_dom_orig:.6f} Hz")
+        print(f"Frequência dominante (maior energia) - filtrado: {f_dom_filt:.6f} Hz")
+        # destaca nos gráficos
+        plt.subplot(3, 2, 3)
+        plt.plot([f_dom_orig], [mag_orig_pos[idx_dom_orig]], 'ko', label=rf'Slug freq. = {f_dom_orig:.2f} Hz')
+        plt.legend()
+        plt.subplot(3, 2, 4)
+        plt.plot([f_dom_filt], [mag_filt_pos[idx_dom_filt]], 'ko', label=rf'Slug freq. = {f_dom_filt:.2f} Hz')
+        plt.legend()
+    
+    # Filter response
+    plt.subplot(3, 2, 6)
+    nyquist = fs / 2
+    normalized_cutoff = freq_corte / nyquist
+    b, a = signal.butter(4, normalized_cutoff, btype='low', analog=False)
+    w, h = signal.freqz(b, a, worN=8000)
+    plt.plot(0.5*fs*w/np.pi, np.abs(h), 'g-', linewidth=2, label='Filter response')
+    plt.axvline(x=freq_corte, color='r', linestyle='--', alpha=0.7, label=f'fc = {freq_corte} Hz')
+    plt.xlabel('Frequency (Hz)')
+    plt.ylabel('Magnitude')
+    plt.title('Butterworth Filter Response')
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.xlim(0, min(fs/2, freq_corte*3))
     
     plt.tight_layout()
     
+    # Cria diretório de saída se não existir
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Simplifica o nome da coluna para o arquivo
+    coluna_simples = coluna.replace("/'Untitled'/", "").replace("'", "").replace("/", "_")
+    
     # Salva o gráfico
-    output_path = os.path.join(output_dir, f"fft_analysis_{coluna}_{base_name}.png")
-    plt.savefig(output_path)
+    output_path = os.path.join(output_dir, f"fft_filtered_{coluna_simples}_{base_name}_fc{freq_corte}Hz.png")
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
     
-    # Salva os dados da FFT em um arquivo
-    fft_data = pd.DataFrame({
+    # Salva os dados da FFT em arquivos separados
+    fft_data_original = pd.DataFrame({
         'Frequência (Hz)': freqs[positive_freq_mask],
-        'Magnitude': magnitude[positive_freq_mask]
+        'Magnitude_Original': magnitude_original[positive_freq_mask]
     })
     
-    output_file = os.path.join(output_dir, f"fft_data_{coluna}_{base_name}.txt")
-    fft_data.to_csv(output_file, sep='\t', index=False)
+    fft_data_filtered = pd.DataFrame({
+        'Frequência (Hz)': freqs[positive_freq_mask],
+        'Magnitude_Filtrado': magnitude_filtered[positive_freq_mask]
+    })
     
-    return fft_data
+    # Salva dados originais
+    output_file_original = os.path.join(output_dir, f"fft_original_{coluna_simples}_{base_name}.txt")
+    fft_data_original.to_csv(output_file_original, sep='\t', index=False)
+    
+    # Salva dados filtrados
+    output_file_filtered = os.path.join(output_dir, f"fft_filtered_{coluna_simples}_{base_name}_fc{freq_corte}Hz.txt")
+    fft_data_filtered.to_csv(output_file_filtered, sep='\t', index=False)
+    
+    # Salva dados combinados
+    fft_data_combined = pd.DataFrame({
+        'Frequência (Hz)': freqs[positive_freq_mask],
+        'Magnitude_Original': magnitude_original[positive_freq_mask],
+        'Magnitude_Filtrado': magnitude_filtered[positive_freq_mask],
+        'Diferença': magnitude_original[positive_freq_mask] - magnitude_filtered[positive_freq_mask]
+    })
+    
+    output_file_combined = os.path.join(output_dir, f"fft_comparison_{coluna_simples}_{base_name}_fc{freq_corte}Hz.txt")
+    fft_data_combined.to_csv(output_file_combined, sep='\t', index=False)
+    
+    return fft_data_combined
 
 def extract_info_from_filename(filename: str):
     """
@@ -245,9 +414,22 @@ if __name__ == "__main__":
         except ValueError:
             print("Entrada inválida. Digite um número válido.")
     
-    # Aplica a FFT
-    fft_data = apply_fft(df, coluna_escolhida, output_dir, base_name)
+    # Mostra informações sobre o filtro
+    print(f"\nFiltro passa-baixa configurado:")
+    print(f"Frequência de corte: {freq_corte} Hz")
     
-    print("\nAnálise FFT concluída!")
-    print(f"Gráfico salvo em: {os.path.join(output_dir, f'fft_analysis_{coluna_escolhida}_{base_name}.png')}")
-    print(f"Dados da FFT salvos em: {os.path.join(output_dir, f'fft_data_{coluna_escolhida}_{base_name}.txt')}") 
+    # Calcula frequência de amostragem para mostrar informações
+    dt = np.mean(np.diff(df['X_Value']))
+    fs = 1/dt
+    print(f"Frequência de amostragem: {fs:.2f} Hz")
+    print(f"Frequência de Nyquist: {fs/2:.2f} Hz")
+    
+    # Aplica a FFT com filtro
+    fft_data = apply_fft(df, coluna_escolhida, output_dir, base_name, freq_corte)
+    
+    print("\nAnálise FFT com filtro passa-baixa concluída!")
+    coluna_simples = coluna_escolhida.replace("/'Untitled'/", "").replace("'", "").replace("/", "_")
+    print(f"Gráfico salvo em: {os.path.join(output_dir, f'fft_filtered_{coluna_simples}_{base_name}_fc{freq_corte}Hz.png')}")
+    print(f"Dados originais salvos em: {os.path.join(output_dir, f'fft_original_{coluna_simples}_{base_name}.txt')}")
+    print(f"Dados filtrados salvos em: {os.path.join(output_dir, f'fft_filtered_{coluna_simples}_{base_name}_fc{freq_corte}Hz.txt')}")
+    print(f"Dados comparativos salvos em: {os.path.join(output_dir, f'fft_comparison_{coluna_simples}_{base_name}_fc{freq_corte}Hz.txt')}") 
