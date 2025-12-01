@@ -10,8 +10,10 @@ from scipy import signal
 ####################################################################################################################################################
 #                                            INPUTS
 ####################################################################################################################################################
-file_path = 'G:/Meu Drive/LEMI/uncertainties/data_example/example/freq_slug/AOU90P10/AOU90P10_acc.tdms' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
-freq_corte = 20.0  # Frequência de corte do filtro passa-baixa em Hz - MODIFIQUE ESTE VALOR CONFORME NECESSÁRIO
+file_path = 'G:/Meu Drive/LEMI/uncertainties/data_example/example/freq_slug/AOU05P03/AOU05P03_acc.tdms' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
+freq_corte = 1000.0  # Frequência de corte do filtro passa-baixa em Hz (None = sem filtragem) - MODIFIQUE ESTE VALOR CONFORME NECESSÁRIO
+freq_min_plot = 0.0  # Frequência mínima para o plot da FFT em Hz - MODIFIQUE ESTE VALOR CONFORME NECESSÁRIO
+freq_max_plot = 100.0  # Frequência máxima para o plot da FFT em Hz - MODIFIQUE ESTE VALOR CONFORME NECESSÁRIO
 
 ### Colunas de interesse -> Insira o nome das colunas a plotar e avaliar do arquivo TDMS
 # Lista de colunas para análise: [nome_coluna, apelido, unidade]
@@ -127,12 +129,16 @@ def apply_lowpass_filter(data: np.ndarray, fs: float, fc: float, order: int = 4)
     Args:
         data (np.ndarray): Dados de entrada
         fs (float): Frequência de amostragem em Hz
-        fc (float): Frequência de corte em Hz
+        fc (float): Frequência de corte em Hz (None = sem filtragem)
         order (int): Ordem do filtro (padrão: 4)
         
     Returns:
-        np.ndarray: Dados filtrados
+        np.ndarray: Dados filtrados (ou originais se fc=None)
     """
+    # Se fc for None, retorna os dados originais sem filtragem
+    if fc is None:
+        return data
+    
     # Normaliza a frequência de corte
     nyquist = fs / 2
     normalized_cutoff = fc / nyquist
@@ -169,17 +175,19 @@ def check_required_columns(df: pd.DataFrame, colunas_analise: list):
     
     return True
 
-def apply_fft(df: pd.DataFrame, coluna: str, output_dir: str, base_name: str, freq_corte: float):
+def apply_fft(df: pd.DataFrame, coluna: str, output_dir: str, base_name: str, freq_corte: float, freq_min_plot: float, freq_max_plot: float):
     """
     Aplica a FFT em uma coluna específica do DataFrame e plota os resultados.
-    Inclui aplicação de filtro passa-baixa.
+    Inclui aplicação de filtro passa-baixa (se freq_corte não for None).
     
     Args:
         df (pd.DataFrame): DataFrame com os dados
         coluna (str): Nome da coluna para análise
         output_dir (str): Diretório para salvar os resultados
         base_name (str): Nome base para os arquivos de saída
-        freq_corte (float): Frequência de corte do filtro passa-baixa em Hz
+        freq_corte (float or None): Frequência de corte do filtro passa-baixa em Hz (None = sem filtragem)
+        freq_min_plot (float): Frequência mínima para o plot da FFT em Hz
+        freq_max_plot (float): Frequência máxima para o plot da FFT em Hz
     """
     # Obtém os dados da coluna
     y_data = df[coluna].values
@@ -202,13 +210,20 @@ def apply_fft(df: pd.DataFrame, coluna: str, output_dir: str, base_name: str, fr
     fft_result_filtered = np.fft.fft(y_filtered)
     magnitude_filtered = np.abs(fft_result_filtered)
     
+    # Filtra frequências para o plot
+    positive_freq_mask = freqs > 0
+    freq_plot_mask = (freqs >= freq_min_plot) & (freqs <= freq_max_plot) & positive_freq_mask
+    
     # Plota os resultados
     plt.figure(figsize=(20, 12))
     
     # Time series - original vs filtered
     plt.subplot(3, 2, 1)
     plt.plot(time, y_data, 'b-', alpha=0.7, label='Original signal', linewidth=0.8)
-    plt.plot(time, y_filtered, 'r-', label=f'Filtered signal (fc={freq_corte} Hz)', linewidth=1.2)
+    if freq_corte is not None:
+        plt.plot(time, y_filtered, 'r-', label=f'Filtered signal (fc={freq_corte} Hz)', linewidth=1.2)
+    else:
+        plt.plot(time, y_filtered, 'r-', label='Signal (no filter)', linewidth=1.2)
     plt.xlabel('Time (s)')
     plt.ylabel('Amplitude')
     plt.title(f'Time Series - {coluna.split("/")[-1].replace("_", " ")}')
@@ -219,7 +234,10 @@ def apply_fft(df: pd.DataFrame, coluna: str, output_dir: str, base_name: str, fr
     plt.subplot(3, 2, 2)
     mask_zoom = time <= 2.0
     plt.plot(time[mask_zoom], y_data[mask_zoom], 'b-', alpha=0.7, label='Original', linewidth=0.8)
-    plt.plot(time[mask_zoom], y_filtered[mask_zoom], 'r-', label=f'Filtered (fc={freq_corte} Hz)', linewidth=1.2)
+    if freq_corte is not None:
+        plt.plot(time[mask_zoom], y_filtered[mask_zoom], 'r-', label=f'Filtered (fc={freq_corte} Hz)', linewidth=1.2)
+    else:
+        plt.plot(time[mask_zoom], y_filtered[mask_zoom], 'r-', label='Signal (no filter)', linewidth=1.2)
     plt.xlabel('Time (s)')
     plt.ylabel('Amplitude')
     plt.title('Zoom - First 2 seconds')
@@ -228,43 +246,48 @@ def apply_fft(df: pd.DataFrame, coluna: str, output_dir: str, base_name: str, fr
     
     # Frequency spectrum - original
     plt.subplot(3, 2, 3)
-    positive_freq_mask = freqs > 0
-    plt.plot(freqs[positive_freq_mask], magnitude_original[positive_freq_mask], 'b-', linewidth=0.8)
-    plt.axvline(x=freq_corte, color='r', linestyle='--', alpha=0.7, label=f'Cutoff frequency ({freq_corte} Hz)')
+    plt.plot(freqs[freq_plot_mask], magnitude_original[freq_plot_mask], 'b-', linewidth=0.8)
+    if freq_corte is not None:
+        plt.axvline(x=freq_corte, color='r', linestyle='--', alpha=0.7, label=f'Cutoff frequency ({freq_corte} Hz)')
     plt.xlabel('Frequency (Hz)')
     plt.ylabel('Magnitude')
     plt.title('Original Spectrum')
     plt.grid(True, alpha=0.3)
     plt.legend()
-    plt.xlim(0, min(fs/2, freq_corte*3))  # Limita até 3x a frequência de corte
+    plt.xlim(freq_min_plot, freq_max_plot)
     
     # Frequency spectrum - filtered
     plt.subplot(3, 2, 4)
-    plt.plot(freqs[positive_freq_mask], magnitude_filtered[positive_freq_mask], 'r-', linewidth=0.8)
-    plt.axvline(x=freq_corte, color='r', linestyle='--', alpha=0.7, label=f'Cutoff frequency ({freq_corte} Hz)')
+    plt.plot(freqs[freq_plot_mask], magnitude_filtered[freq_plot_mask], 'r-', linewidth=0.8)
+    if freq_corte is not None:
+        plt.axvline(x=freq_corte, color='r', linestyle='--', alpha=0.7, label=f'Cutoff frequency ({freq_corte} Hz)')
     plt.xlabel('Frequency (Hz)')
     plt.ylabel('Magnitude')
-    plt.title('Filtered Spectrum')
+    if freq_corte is not None:
+        plt.title('Filtered Spectrum')
+    else:
+        plt.title('Spectrum (no filter)')
     plt.grid(True, alpha=0.3)
     plt.legend()
-    plt.xlim(0, min(fs/2, freq_corte*3))
+    plt.xlim(freq_min_plot, freq_max_plot)
     
     # Spectra comparison
     plt.subplot(3, 2, 5)
-    plt.plot(freqs[positive_freq_mask], magnitude_original[positive_freq_mask], 'b-', alpha=0.7, label='Original', linewidth=0.8)
-    plt.plot(freqs[positive_freq_mask], magnitude_filtered[positive_freq_mask], 'r-', label='Filtered', linewidth=0.8)
-    plt.axvline(x=freq_corte, color='g', linestyle='--', alpha=0.7, label=f'fc = {freq_corte} Hz')
+    plt.plot(freqs[freq_plot_mask], magnitude_original[freq_plot_mask], 'b-', alpha=0.7, label='Original', linewidth=0.8)
+    plt.plot(freqs[freq_plot_mask], magnitude_filtered[freq_plot_mask], 'r-', label='Filtered' if freq_corte is not None else 'Signal', linewidth=0.8)
+    if freq_corte is not None:
+        plt.axvline(x=freq_corte, color='g', linestyle='--', alpha=0.7, label=f'fc = {freq_corte} Hz')
     plt.xlabel('Frequency (Hz)')
     plt.ylabel('Magnitude')
     plt.title('Spectra Comparison')
     plt.grid(True, alpha=0.3)
     plt.legend()
-    plt.xlim(0, min(fs/2, freq_corte*3))
+    plt.xlim(freq_min_plot, freq_max_plot)
 
     # Frequências dominantes (maior energia)
-    freqs_pos = freqs[positive_freq_mask]
-    mag_orig_pos = magnitude_original[positive_freq_mask]
-    mag_filt_pos = magnitude_filtered[positive_freq_mask]
+    freqs_pos = freqs[freq_plot_mask]
+    mag_orig_pos = magnitude_original[freq_plot_mask]
+    mag_filt_pos = magnitude_filtered[freq_plot_mask]
     if len(freqs_pos) > 0:
         idx_dom_orig = int(np.argmax(mag_orig_pos))
         idx_dom_filt = int(np.argmax(mag_filt_pos))
@@ -283,18 +306,28 @@ def apply_fft(df: pd.DataFrame, coluna: str, output_dir: str, base_name: str, fr
     
     # Filter response
     plt.subplot(3, 2, 6)
-    nyquist = fs / 2
-    normalized_cutoff = freq_corte / nyquist
-    b, a = signal.butter(4, normalized_cutoff, btype='low', analog=False)
-    w, h = signal.freqz(b, a, worN=8000)
-    plt.plot(0.5*fs*w/np.pi, np.abs(h), 'g-', linewidth=2, label='Filter response')
-    plt.axvline(x=freq_corte, color='r', linestyle='--', alpha=0.7, label=f'fc = {freq_corte} Hz')
-    plt.xlabel('Frequency (Hz)')
-    plt.ylabel('Magnitude')
-    plt.title('Butterworth Filter Response')
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-    plt.xlim(0, min(fs/2, freq_corte*3))
+    if freq_corte is not None:
+        nyquist = fs / 2
+        normalized_cutoff = freq_corte / nyquist
+        b, a = signal.butter(4, normalized_cutoff, btype='low', analog=False)
+        w, h = signal.freqz(b, a, worN=8000)
+        freq_response = 0.5*fs*w/np.pi
+        mask_response = (freq_response >= freq_min_plot) & (freq_response <= freq_max_plot)
+        plt.plot(freq_response[mask_response], np.abs(h)[mask_response], 'g-', linewidth=2, label='Filter response')
+        plt.axvline(x=freq_corte, color='r', linestyle='--', alpha=0.7, label=f'fc = {freq_corte} Hz')
+        plt.xlabel('Frequency (Hz)')
+        plt.ylabel('Magnitude')
+        plt.title('Butterworth Filter Response')
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.xlim(freq_min_plot, freq_max_plot)
+    else:
+        plt.text(0.5, 0.5, 'No filter applied', ha='center', va='center', transform=plt.gca().transAxes, fontsize=14)
+        plt.xlabel('Frequency (Hz)')
+        plt.ylabel('Magnitude')
+        plt.title('Filter Response')
+        plt.grid(True, alpha=0.3)
+        plt.xlim(freq_min_plot, freq_max_plot)
     
     plt.tight_layout()
     
@@ -305,19 +338,22 @@ def apply_fft(df: pd.DataFrame, coluna: str, output_dir: str, base_name: str, fr
     coluna_simples = coluna.replace("/'Untitled'/", "").replace("'", "").replace("/", "_")
     
     # Salva o gráfico
-    output_path = os.path.join(output_dir, f"fft_filtered_{coluna_simples}_{base_name}_fc{freq_corte}Hz.png")
+    if freq_corte is not None:
+        output_path = os.path.join(output_dir, f"fft_filtered_{coluna_simples}_{base_name}_fc{freq_corte}Hz.png")
+    else:
+        output_path = os.path.join(output_dir, f"fft_{coluna_simples}_{base_name}_nofilter.png")
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
     
     # Salva os dados da FFT em arquivos separados
     fft_data_original = pd.DataFrame({
-        'Frequência (Hz)': freqs[positive_freq_mask],
-        'Magnitude_Original': magnitude_original[positive_freq_mask]
+        'Frequência (Hz)': freqs[freq_plot_mask],
+        'Magnitude_Original': magnitude_original[freq_plot_mask]
     })
     
     fft_data_filtered = pd.DataFrame({
-        'Frequência (Hz)': freqs[positive_freq_mask],
-        'Magnitude_Filtrado': magnitude_filtered[positive_freq_mask]
+        'Frequência (Hz)': freqs[freq_plot_mask],
+        'Magnitude_Filtrado': magnitude_filtered[freq_plot_mask]
     })
     
     # Salva dados originais
@@ -325,18 +361,24 @@ def apply_fft(df: pd.DataFrame, coluna: str, output_dir: str, base_name: str, fr
     fft_data_original.to_csv(output_file_original, sep='\t', index=False)
     
     # Salva dados filtrados
-    output_file_filtered = os.path.join(output_dir, f"fft_filtered_{coluna_simples}_{base_name}_fc{freq_corte}Hz.txt")
+    if freq_corte is not None:
+        output_file_filtered = os.path.join(output_dir, f"fft_filtered_{coluna_simples}_{base_name}_fc{freq_corte}Hz.txt")
+    else:
+        output_file_filtered = os.path.join(output_dir, f"fft_{coluna_simples}_{base_name}_nofilter.txt")
     fft_data_filtered.to_csv(output_file_filtered, sep='\t', index=False)
     
     # Salva dados combinados
     fft_data_combined = pd.DataFrame({
-        'Frequência (Hz)': freqs[positive_freq_mask],
-        'Magnitude_Original': magnitude_original[positive_freq_mask],
-        'Magnitude_Filtrado': magnitude_filtered[positive_freq_mask],
-        'Diferença': magnitude_original[positive_freq_mask] - magnitude_filtered[positive_freq_mask]
+        'Frequência (Hz)': freqs[freq_plot_mask],
+        'Magnitude_Original': magnitude_original[freq_plot_mask],
+        'Magnitude_Filtrado': magnitude_filtered[freq_plot_mask],
+        'Diferença': magnitude_original[freq_plot_mask] - magnitude_filtered[freq_plot_mask]
     })
     
-    output_file_combined = os.path.join(output_dir, f"fft_comparison_{coluna_simples}_{base_name}_fc{freq_corte}Hz.txt")
+    if freq_corte is not None:
+        output_file_combined = os.path.join(output_dir, f"fft_comparison_{coluna_simples}_{base_name}_fc{freq_corte}Hz.txt")
+    else:
+        output_file_combined = os.path.join(output_dir, f"fft_comparison_{coluna_simples}_{base_name}_nofilter.txt")
     fft_data_combined.to_csv(output_file_combined, sep='\t', index=False)
     
     return fft_data_combined
@@ -415,8 +457,13 @@ if __name__ == "__main__":
             print("Entrada inválida. Digite um número válido.")
     
     # Mostra informações sobre o filtro
-    print(f"\nFiltro passa-baixa configurado:")
-    print(f"Frequência de corte: {freq_corte} Hz")
+    if freq_corte is not None:
+        print(f"\nFiltro passa-baixa configurado:")
+        print(f"Frequência de corte: {freq_corte} Hz")
+    else:
+        print(f"\nNenhum filtro será aplicado (freq_corte = None)")
+    
+    print(f"Faixa de frequência para plotar FFT: {freq_min_plot} - {freq_max_plot} Hz")
     
     # Calcula frequência de amostragem para mostrar informações
     dt = np.mean(np.diff(df['X_Value']))
@@ -425,11 +472,16 @@ if __name__ == "__main__":
     print(f"Frequência de Nyquist: {fs/2:.2f} Hz")
     
     # Aplica a FFT com filtro
-    fft_data = apply_fft(df, coluna_escolhida, output_dir, base_name, freq_corte)
+    fft_data = apply_fft(df, coluna_escolhida, output_dir, base_name, freq_corte, freq_min_plot, freq_max_plot)
     
-    print("\nAnálise FFT com filtro passa-baixa concluída!")
+    print("\nAnálise FFT concluída!")
     coluna_simples = coluna_escolhida.replace("/'Untitled'/", "").replace("'", "").replace("/", "_")
-    print(f"Gráfico salvo em: {os.path.join(output_dir, f'fft_filtered_{coluna_simples}_{base_name}_fc{freq_corte}Hz.png')}")
-    print(f"Dados originais salvos em: {os.path.join(output_dir, f'fft_original_{coluna_simples}_{base_name}.txt')}")
-    print(f"Dados filtrados salvos em: {os.path.join(output_dir, f'fft_filtered_{coluna_simples}_{base_name}_fc{freq_corte}Hz.txt')}")
-    print(f"Dados comparativos salvos em: {os.path.join(output_dir, f'fft_comparison_{coluna_simples}_{base_name}_fc{freq_corte}Hz.txt')}") 
+    if freq_corte is not None:
+        print(f"Gráfico salvo em: {os.path.join(output_dir, f'fft_filtered_{coluna_simples}_{base_name}_fc{freq_corte}Hz.png')}")
+        print(f"Dados filtrados salvos em: {os.path.join(output_dir, f'fft_filtered_{coluna_simples}_{base_name}_fc{freq_corte}Hz.txt')}")
+        print(f"Dados comparativos salvos em: {os.path.join(output_dir, f'fft_comparison_{coluna_simples}_{base_name}_fc{freq_corte}Hz.txt')}")
+    else:
+        print(f"Gráfico salvo em: {os.path.join(output_dir, f'fft_{coluna_simples}_{base_name}_nofilter.png')}")
+        print(f"Dados salvos em: {os.path.join(output_dir, f'fft_{coluna_simples}_{base_name}_nofilter.txt')}")
+        print(f"Dados comparativos salvos em: {os.path.join(output_dir, f'fft_comparison_{coluna_simples}_{base_name}_nofilter.txt')}")
+    print(f"Dados originais salvos em: {os.path.join(output_dir, f'fft_original_{coluna_simples}_{base_name}.txt')}") 
