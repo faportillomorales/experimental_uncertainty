@@ -12,7 +12,7 @@ from scipy import signal
 ####################################################################################################################################################
 #                                            INPUTS
 ####################################################################################################################################################
-file_path = "G:/Meu Drive/LEMI/uncertainties/data_example/example/freq_slug/AOH00P02/AOH00P02_acc.tdms"
+file_path = "G:/Meu Drive/LEMI/uncertainties/data_example/example/freq_slug/AOH00P07/AOH00P07_acc.tdms"
 
 ### Colunas de interesse -> Insira o nome das colunas a plotar e avaliar do arquivo TDMS
 # Lista de colunas para análise: [nome_coluna, apelido, unidade]
@@ -312,69 +312,175 @@ def detect_peaks_in_signal(
 
 
 def match_peaks_between_signals(
-    time1: np.ndarray, peaks1: np.ndarray, time2: np.ndarray, peaks2: np.ndarray
-) -> List[Tuple[int, int, float]]:
+    time1: np.ndarray, 
+    peaks1: np.ndarray, 
+    signal1: np.ndarray,
+    time2: np.ndarray, 
+    peaks2: np.ndarray,
+    signal2: np.ndarray,
+    max_delta_t: float = 10.0,
+    window_search_factor: float = 2.0,
+) -> List[Tuple[int, int, float, float]]:
     """
-    Faz correspondência entre picos de dois sinais baseado na ordem de aparição sequencial.
-    O primeiro pico de acc1 corresponde ao primeiro pico de acc2, segundo com segundo, etc.
+    Faz correspondência inteligente entre picos de dois sinais usando critérios estatísticos e de sinais.
+    
+    Estratégia:
+    1. Calcula estatísticas iniciais dos intervalos de tempo esperados
+    2. Para cada pico do primeiro sinal, busca o melhor match no segundo sinal dentro de uma janela
+    3. Valida matches baseado em:
+       - Distância temporal esperada (baseada em estatísticas)
+       - Similaridade de amplitude relativa
+       - Consistência com matches anteriores
+       - Ordem temporal preservada
     
     Args:
         time1: Array de tempo do primeiro sinal
         peaks1: Índices dos picos no primeiro sinal
+        signal1: Array do primeiro sinal (para análise de amplitude)
         time2: Array de tempo do segundo sinal
         peaks2: Índices dos picos no segundo sinal
+        signal2: Array do segundo sinal (para análise de amplitude)
+        max_delta_t: Delta t máximo aceitável em segundos
+        window_search_factor: Fator para definir janela de busca (multiplica std do delta_t)
     
     Returns:
-        Lista de tuplas (índice_pico1, índice_pico2, delta_tempo)
+        Lista de tuplas (índice_pico1, índice_pico2, delta_tempo, score_qualidade)
     """
     matches = []
     
     if len(peaks1) == 0 or len(peaks2) == 0:
         return matches
     
-    # Obtém tempos dos picos
+    # Obtém tempos e valores dos picos
     peak_times1 = time1[peaks1]
     peak_times2 = time2[peaks2]
+    peak_values1 = signal1[peaks1]
+    peak_values2 = signal2[peaks2]
     
-    # Ordena índices por tempo (retorna índices que ordenam os arrays)
+    # Ordena picos por tempo
     sorted_order1 = np.argsort(peak_times1)
     sorted_order2 = np.argsort(peak_times2)
     
-    # Picos ordenados por tempo (usando índices ordenados)
     sorted_peaks1 = peaks1[sorted_order1]
     sorted_peaks2 = peaks2[sorted_order2]
     sorted_times1 = peak_times1[sorted_order1]
     sorted_times2 = peak_times2[sorted_order2]
+    sorted_values1 = peak_values1[sorted_order1]
+    sorted_values2 = peak_values2[sorted_order2]
     
-    # Faz correspondência sequencial: primeiro com primeiro, segundo com segundo, etc.
-    # Usa o menor número de picos entre os dois sinais
-    n_matches = min(len(sorted_peaks1), len(sorted_peaks2))
+    # Calcula estatísticas iniciais usando matching sequencial simples
+    # para estimar delta_t médio e std
+    initial_delta_times = []
+    n_initial = min(len(sorted_times1), len(sorted_times2), 10)  # Usa primeiros 10 para estimativa
+    for i in range(n_initial):
+        delta_t = abs(sorted_times2[i] - sorted_times1[i])
+        if delta_t < max_delta_t:
+            initial_delta_times.append(delta_t)
     
-    for i in range(n_matches):
-        # Índices originais dos picos (peaks1 e peaks2 já contêm os índices no array completo)
-        # sorted_peaks1[i] é o índice no array de tempo original para o i-ésimo pico ordenado
-        idx1_original = sorted_peaks1[i]
-        idx2_original = sorted_peaks2[i]
-        
-        # Tempos dos picos correspondentes
-        t1 = sorted_times1[i]
-        t2 = sorted_times2[i]
-        
-        # Calcula intervalo de tempo (pode ser positivo ou negativo dependendo da ordem)
-        delta_t = t2 - t1
-        
-        # Usa valor absoluto para calcular velocidade (independente da ordem dos acelerômetros)
-        # Limite máximo razoável: 30 segundos (ajustável conforme necessário)
-        # Para velocidades típicas de slugs (0.1-5 m/s) e distâncias de 0.1-1 m, 
-        # intervalos de até 10s são esperados, mas usamos 30s para ser mais flexível
-        if abs(delta_t) < 10.0:
-            # Usa as posições originais nos arrays peaks1 e peaks2
-            pos1_in_peaks = np.where(peaks1 == idx1_original)[0][0]
-            pos2_in_peaks = np.where(peaks2 == idx2_original)[0][0]
-            # Armazena o valor absoluto do delta_t para cálculo de velocidade
-            matches.append((pos1_in_peaks, pos2_in_peaks, abs(delta_t)))
+    if len(initial_delta_times) > 0:
+        mean_delta_t = np.mean(initial_delta_times)
+        std_delta_t = np.std(initial_delta_times)
+        if std_delta_t == 0:
+            std_delta_t = mean_delta_t * 0.1  # Fallback: 10% da média
+    else:
+        # Fallback: estimativa conservadora
+        mean_delta_t = abs(sorted_times2[0] - sorted_times1[0]) if len(sorted_times1) > 0 and len(sorted_times2) > 0 else 1.0
+        std_delta_t = mean_delta_t * 0.3
     
-    return matches
+    # Normaliza amplitudes para comparação relativa
+    if len(sorted_values1) > 0 and len(sorted_values2) > 0:
+        mean_amp1 = np.mean(np.abs(sorted_values1))
+        mean_amp2 = np.mean(np.abs(sorted_values2))
+        if mean_amp1 > 0:
+            sorted_values1_norm = sorted_values1 / mean_amp1
+        else:
+            sorted_values1_norm = sorted_values1
+        if mean_amp2 > 0:
+            sorted_values2_norm = sorted_values2 / mean_amp2
+        else:
+            sorted_values2_norm = sorted_values2
+    else:
+        sorted_values1_norm = sorted_values1
+        sorted_values2_norm = sorted_values2
+    
+    # Janela de busca baseada em estatísticas
+    search_window = window_search_factor * std_delta_t
+    search_window = max(search_window, mean_delta_t * 0.5)  # Mínimo de 50% da média
+    
+    # Algoritmo de matching inteligente
+    used_peaks2 = set()  # Rastreia picos do sinal 2 já usados
+    
+    for i, (t1, v1_norm, idx1_orig) in enumerate(zip(sorted_times1, sorted_values1_norm, sorted_peaks1)):
+        best_match = None
+        best_score = -np.inf
+        
+        # Busca candidatos no segundo sinal
+        for j, (t2, v2_norm, idx2_orig) in enumerate(zip(sorted_times2, sorted_values2_norm, sorted_peaks2)):
+            # Pula se já foi usado
+            if j in used_peaks2:
+                continue
+            
+            # Calcula delta_t
+            delta_t = abs(t2 - t1)
+            
+            # Verifica limites básicos
+            if delta_t > max_delta_t:
+                continue
+            
+            # Score baseado em múltiplos critérios
+            score = 0.0
+            
+            # 1. Proximidade temporal (quanto mais próximo do delta_t esperado, melhor)
+            temporal_score = 1.0 / (1.0 + abs(delta_t - mean_delta_t) / (std_delta_t + 1e-6))
+            score += 2.0 * temporal_score  # Peso maior para critério temporal
+            
+            # 2. Similaridade de amplitude relativa
+            amp_diff = abs(v1_norm - v2_norm)
+            amp_score = 1.0 / (1.0 + amp_diff)
+            score += 1.0 * amp_score
+            
+            # 3. Preservação de ordem temporal (picos posteriores devem ter matches posteriores)
+            if len(matches) > 0:
+                last_match_idx2 = matches[-1][1]
+                if j > last_match_idx2:  # Mantém ordem
+                    score += 0.5
+                elif j < last_match_idx2:  # Quebra ordem
+                    score -= 1.0
+            
+            # 4. Janela de busca adaptativa
+            if abs(delta_t - mean_delta_t) <= search_window:
+                score += 0.5
+            
+            # Atualiza melhor match
+            if score > best_score:
+                best_score = score
+                best_match = (j, idx2_orig, delta_t)
+        
+        # Aceita match se score for suficientemente bom
+        if best_match is not None and best_score > 0.5:
+            j, idx2_orig, delta_t = best_match
+            used_peaks2.add(j)
+            
+            # Converte índices para posições nos arrays originais
+            pos1_in_peaks = np.where(peaks1 == idx1_orig)[0][0]
+            pos2_in_peaks = np.where(peaks2 == idx2_orig)[0][0]
+            
+            matches.append((pos1_in_peaks, pos2_in_peaks, delta_t, best_score))
+            
+            # Atualiza estatísticas com novo match (média móvel)
+            alpha = 0.3  # Fator de suavização
+            mean_delta_t = alpha * delta_t + (1 - alpha) * mean_delta_t
+            # Atualiza std de forma simplificada
+            if len(matches) > 1:
+                recent_deltas = [m[2] for m in matches[-min(5, len(matches)):]]
+                std_delta_t = np.std(recent_deltas)
+                if std_delta_t == 0:
+                    std_delta_t = mean_delta_t * 0.1
+    
+    # Retorna apenas matches válidos (com score mínimo)
+    valid_matches = [(m[0], m[1], m[2], m[3]) for m in matches if m[3] > 0.3]
+    
+    return valid_matches
 
 
 def calculate_velocities(delta_times: np.ndarray, distance: float) -> np.ndarray:
@@ -399,7 +505,8 @@ def plot_slug_velocity_analysis(
     signals: List[np.ndarray],
     signal_names: List[str],
     peaks_list: List[np.ndarray],
-    matches: List[Tuple[int, int, float]],
+    matches: List[Tuple[int, int, float, float]],
+    valid_matches_indices: np.ndarray,
     velocities: np.ndarray,
     distance: float,
     output_path: str,
@@ -425,30 +532,48 @@ def plot_slug_velocity_analysis(
         time_plot = time
         signals_plot = signals
     
+    # Identifica quais picos estão sendo usados nos cálculos
+    used_peaks1 = set()
+    used_peaks2 = set()
+    if len(valid_matches_indices) > 0 and len(matches) > 0:
+        for match_idx in valid_matches_indices:
+            if match_idx < len(matches):
+                idx1, idx2, _, _ = matches[match_idx]
+                used_peaks1.add(idx1)
+                used_peaks2.add(idx2)
+    
     # Plota sinais e picos
     for i, (ax, signal_data_plot, signal_name, peaks) in enumerate(zip(axes, signals_plot, signal_names, peaks_list)):
         # Plota sinal filtrado
         ax.plot(time_plot, signal_data_plot, color=colors[i % len(colors)], linestyle="-", linewidth=LINEWIDTH, alpha=0.8)
         
-        # Marca picos (apenas os que estão no intervalo plotado)
+        # Marca apenas os picos que estão sendo usados nos cálculos
         if len(peaks) > 0:
             peak_times = time[peaks]
             # Usa o sinal original para obter os valores dos picos
             signal_original = signals[i]
             peak_values = signal_original[peaks]
             
-            if ignore_initial_seconds > 0:
-                # Filtra picos que estão no intervalo plotado
-                peak_mask = peak_times >= ignore_initial_seconds
-                peak_times_plot = peak_times[peak_mask]
-                peak_values_plot = peak_values[peak_mask]
-            else:
-                peak_times_plot = peak_times
-                peak_values_plot = peak_values
+            # Filtra apenas picos usados nos cálculos
+            used_peaks_set = used_peaks1 if i == 0 else used_peaks2
+            used_peak_mask = np.array([j in used_peaks_set for j in range(len(peaks))])
             
-            if len(peak_times_plot) > 0:
-                ax.scatter(peak_times_plot, peak_values_plot, color="red", s=100, zorder=5, marker="o", 
-                          edgecolors="black", linewidths=1.5, label="Peaks")
+            if np.any(used_peak_mask):
+                peak_times_used = peak_times[used_peak_mask]
+                peak_values_used = peak_values[used_peak_mask]
+                
+                if ignore_initial_seconds > 0:
+                    # Filtra picos que estão no intervalo plotado
+                    time_mask = peak_times_used >= ignore_initial_seconds
+                    peak_times_plot = peak_times_used[time_mask]
+                    peak_values_plot = peak_values_used[time_mask]
+                else:
+                    peak_times_plot = peak_times_used
+                    peak_values_plot = peak_values_used
+                
+                if len(peak_times_plot) > 0:
+                    ax.scatter(peak_times_plot, peak_values_plot, color="red", s=100, zorder=5, marker="o", 
+                              edgecolors="black", linewidths=1.5, label="Matched Peaks")
         
         # Estilo do eixo
         signal_label = signal_name.replace("/'Untitled'/", "").replace("'", "").replace("/", "_")
@@ -463,16 +588,20 @@ def plot_slug_velocity_analysis(
                 edgecolor="black", alpha=0.8))
     
     # Conecta picos correspondentes com linhas verticais e mostra informações
-    if len(matches) > 0 and len(velocities) > 0 and n_signals >= 2:
+    if len(matches) > 0 and len(valid_matches_indices) > 0 and len(velocities) > 0 and n_signals >= 2:
         peaks1 = peaks_list[0]
         peaks2 = peaks_list[1]
         
         # Limita número de anotações para não poluir o gráfico
-        max_annotations = min(10, len(matches))
-        annotation_indices = np.linspace(0, len(matches) - 1, max_annotations, dtype=int)
+        max_annotations = min(10, len(valid_matches_indices))
+        if len(valid_matches_indices) > 0:
+            annotation_indices = np.linspace(0, len(valid_matches_indices) - 1, max_annotations, dtype=int)
+        else:
+            annotation_indices = []
         
-        for match_idx, (idx1, idx2, delta_t) in enumerate(matches):
-            if match_idx < len(velocities) and velocities[match_idx] > 0:
+        for ann_idx, match_idx in enumerate(valid_matches_indices):
+            if match_idx < len(matches):
+                idx1, idx2, delta_t, score = matches[match_idx]
                 peak1_time = time[peaks1[idx1]]
                 peak2_time = time[peaks2[idx2]]
                 
@@ -486,31 +615,32 @@ def plot_slug_velocity_analysis(
                 axes[1].axvline(x=peak2_time, color="blue", linestyle="--", linewidth=1.0, alpha=0.4)
                 
                 # Adiciona anotação com velocidade (apenas para alguns picos para não poluir)
-                if match_idx in annotation_indices:
-                    mid_x = (peak1_time + peak2_time) / 2
-                    y_min, y_max = axes[1].get_ylim()
-                    
-                    # Alterna posição vertical: pares na parte superior, ímpares na inferior
-                    annotation_position_idx = np.where(annotation_indices == match_idx)[0][0]
-                    if annotation_position_idx % 2 == 0:
-                        # Posição superior
-                        y_annot = y_max * 0.85
-                        va_align = "bottom"
-                    else:
-                        # Posição inferior
-                        y_annot = y_min + (y_max - y_min) * 0.15
-                        va_align = "top"
-                    
-                    axes[1].annotate(
-                        f"Δt={delta_t:.3f}s\nv={velocities[match_idx]:.2f}m/s",
-                        xy=(mid_x, y_annot),
-                        xytext=(mid_x, y_annot),
-                        fontsize=8,
-                        ha="center",
-                        va=va_align,
-                        bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", 
-                                 edgecolor="black", alpha=0.7),
-                    )
+                if ann_idx < len(velocities) and velocities[ann_idx] > 0:
+                    if ann_idx in annotation_indices or len(valid_matches_indices) <= max_annotations:
+                        mid_x = (peak1_time + peak2_time) / 2
+                        y_min, y_max = axes[1].get_ylim()
+                        
+                        # Alterna posição vertical: pares na parte superior, ímpares na inferior
+                        annotation_position_idx = ann_idx % 2
+                        if annotation_position_idx == 0:
+                            # Posição superior
+                            y_annot = y_max * 0.85
+                            va_align = "bottom"
+                        else:
+                            # Posição inferior
+                            y_annot = y_min + (y_max - y_min) * 0.15
+                            va_align = "top"
+                        
+                        axes[1].annotate(
+                            f"Δt={delta_t:.3f}s\nv={velocities[ann_idx]:.2f}m/s",
+                            xy=(mid_x, y_annot),
+                            xytext=(mid_x, y_annot),
+                            fontsize=8,
+                            ha="center",
+                            va=va_align,
+                            bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", 
+                                     edgecolor="black", alpha=0.7),
+                        )
     
     # Adiciona informações de velocidade abaixo do último gráfico
     if len(matches) > 0 and len(velocities) > 0:
@@ -657,10 +787,18 @@ def main():
             first_delta = peak_times2_sorted[0] - peak_times1_sorted[0]
             print(f"  Delta t (primeiro par): {first_delta:.3f} s")
     
-    # Faz correspondência sequencial entre picos (primeiro com primeiro, segundo com segundo, etc.)
-    print("\nFazendo correspondência sequencial de picos...")
-    matches = match_peaks_between_signals(time, peaks1_idx, time, peaks2_idx)
+    # Faz correspondência inteligente entre picos usando critérios estatísticos
+    print("\nFazendo correspondência inteligente de picos (usando critérios estatísticos e de sinais)...")
+    matches = match_peaks_between_signals(
+        time, peaks1_idx, signal1_filtered,
+        time, peaks2_idx, signal2_filtered,
+        max_delta_t=10.0,
+        window_search_factor=2.0
+    )
     print(f"Picos correspondentes encontrados: {len(matches)} (de {min(len(peaks1_idx), len(peaks2_idx))} possíveis)")
+    if len(matches) > 0:
+        scores = [m[3] for m in matches]
+        print(f"  Score médio de qualidade: {np.mean(scores):.3f} (min: {np.min(scores):.3f}, max: {np.max(scores):.3f})")
     
     if len(matches) == 0:
         print("\nERRO: Não foi possível encontrar picos correspondentes entre os dois sinais.")
@@ -684,17 +822,17 @@ def main():
         print(f"  Accel2: {len(peaks2_idx)} picos")
         print(f"  Usando apenas os primeiros {len(matches)} pares correspondentes")
     
-    # Calcula intervalos de tempo
+    # Calcula intervalos de tempo (extrai apenas delta_t dos matches)
     delta_times = np.array([match[2] for match in matches])
     
     # Debug: mostra primeiros intervalos de tempo calculados
     print(f"\n=== DEBUG: Intervalos de Tempo Calculados ===")
     print(f"Primeiros 5 intervalos de tempo (delta_t):")
     for i in range(min(5, len(delta_times))):
-        idx1, idx2, dt = matches[i]
+        idx1, idx2, dt, score = matches[i]
         t1 = time[peaks1_idx[idx1]]
         t2 = time[peaks2_idx[idx2]]
-        print(f"  Par {i+1}: t1={t1:.6f}s, t2={t2:.6f}s, delta_t={dt:.6f}s")
+        print(f"  Par {i+1}: t1={t1:.6f}s, t2={t2:.6f}s, delta_t={dt:.6f}s, score={score:.3f}")
     print(f"Delta_t mínimo: {np.min(delta_times):.6f} s")
     print(f"Delta_t máximo: {np.max(delta_times):.6f} s")
     print(f"Delta_t médio: {np.mean(delta_times):.6f} s")
@@ -735,6 +873,9 @@ def main():
     valid_mask = np.zeros(len(matches), dtype=bool)
     valid_dt_indices = np.where(valid_dt_mask)[0]  # Índices dos matches que passaram validação de delta_t
     valid_mask[valid_dt_indices[valid_velocity_mask]] = True  # Marca apenas os que passaram ambas validações
+    
+    # Índices dos matches válidos para plotagem
+    valid_matches_indices = np.where(valid_mask)[0]
     
     if len(velocities_valid) == 0:
         print("\nERRO: Não foi possível calcular velocidades válidas.")
@@ -778,15 +919,13 @@ def main():
     signal_names_plot = [coluna1, coluna2]
     peaks_list_plot = [peaks1_idx, peaks2_idx]
     
-    # Filtra matches válidos para plotagem
-    valid_matches = [matches[i] for i in valid_matches_indices]
-    
     plot_slug_velocity_analysis(
         time=time,
         signals=signals_plot,
         signal_names=signal_names_plot,
         peaks_list=peaks_list_plot,
-        matches=valid_matches,
+        matches=matches,
+        valid_matches_indices=valid_matches_indices,
         velocities=velocities_valid,
         distance=distance,
         output_path=plot_path,
