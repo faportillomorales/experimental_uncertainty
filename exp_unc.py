@@ -10,7 +10,7 @@ import sys
 ####################################################################################################################################################
 #                                            INPUTS
 ####################################################################################################################################################
-file_path = 'C:/FSC2/TESTES DE OLEO/AOH00/AOH00T02/AOH00T02-teste' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
+file_path = 'data_example/example/PGD/PGD-SOU45P01/PGD-SOU45P01.txt' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
 
 L = 1.70         # m comprimento entre as tomadas de diferencial de pressão
 
@@ -19,26 +19,26 @@ L = 1.70         # m comprimento entre as tomadas de diferencial de pressão
 I_G = None  # Será preenchido automaticamente
 I_L = None  # Será preenchido automaticamente
 
-sensor_Yokogawa = 'PDT-M-0101D-30kPa'
-sensor_Endress = 'PDT-M-0101-40kPa(Pa)'
+sensor_Yokogawa = None
+sensor_Endress = 'PDT-M-0101C-3kPa_mA'
 
-pressao_mesa = 'PIT-M-0101(bar)'
-temperatura_mesa = 'TIT-M-0101(C)'
+pressao_mesa = 'PIT-M-0301'
+temperatura_mesa = 'TIT-M-0301'
 
-pressao_parede = 'PIT-A-0301(bar)'
-temperatura_parede = 'TIT-A-0301(C)'
+pressao_parede = 'PIT-S-0501'
+temperatura_parede = 'TIT-S-0501'
 ### Colunas de interesse -> Insira o nome das colunas a plotar e avaliar do arquivo .dat
 # Lista de colunas para análise: [nome_coluna, apelido, unidade]
 colunas_analise = [
-    [sensor_Yokogawa, r'\Delta P_{30\,kPa} / L', r'[Pa/m]'],
+    [sensor_Endress, r'\Delta P_{3\,kPa} / L', r'[Pa/m]'],
     ['Alpha', r'\alpha', r''],
-    ['J_Oil(m/s)', r'J_{oil}', r'[m/s]'],
-    ['J_Air(m/s)', r'J_{air}', r'[m/s]'],
-    ['FT-O-0301(m3h)', r'Q_{oil}', r'[m³/h]'],
+    ['J_Oleo', r'J_{oil}', r'[m/s]'],
+    ['J_SF6', r'J_{SF_6}', r'[m/s]'],
+    ['FT-O-0602', r'Q_{oil}', r'[m³/h]'],
     [pressao_mesa, r'Gauge\ Pressure', r'[Bar]'],
     [temperatura_mesa, r'Temperature', r'[°C]'],
-    ['rho_g', r'\rho_{air}', r'[kg/m³]'],
-    ['rho_g_parede', r'\rho_{air-parede}', r'[kg/m³]']
+    ['rho_g', r'\rho_{SF_6}', r'[kg/m³]'],
+    ['rho_g_parede', r'\rho_{SF_6-parede}', r'[kg/m³]']
 ]
 ####################################################################################################################################################
 #       '                                   END INPUTS
@@ -225,18 +225,40 @@ def format_filename(alias: str, unit: str) -> str:
     return name
 
 def uncertainties_calc(resumo_df,window_df):
-    if '-30' in sensor_Yokogawa:         #### Mudar nome no Labview
-        span_yokogawa = 29E3  
-    elif '-10' in sensor_Yokogawa:
-        span_yokogawa = 9E3     
+     
 
     # Incerteza dos sensores Yokogawa
-    udP = 0.00055*span_yokogawa
-    dP_mean = np.mean(window_df[sensor_Yokogawa])
-    dP = unc.ufloat(dP_mean,udP)
-    print(sensor_Yokogawa)
-    print(f'dP: {dP:.3f}')
-
+    if sensor_Yokogawa != None:
+        if '-30' in sensor_Yokogawa:         #### Mudar nome no Labview
+            span_yokogawa = 29E3  
+        elif '-10' in sensor_Yokogawa:
+            span_yokogawa = 9E3    
+        elif '-50' in sensor_Yokogawa:
+            span_yokogawa = 49E3
+        else:
+            print('Sensor Yokogawa não suportado')
+            exit()
+        udP = 0.0005*span_yokogawa
+        dP_mean = np.mean(window_df[sensor_Yokogawa])
+        dP = unc.ufloat(dP_mean,udP)
+        print(sensor_Yokogawa)
+        print(f'dP: {dP:.3f}')
+    
+    if sensor_Endress != None:
+        if '-3' in sensor_Endress:
+            span_endress = 6E3
+        elif '-10' in sensor_Endress:
+            span_endress = 20E3
+        elif '-40' in sensor_Endress:
+            span_endress = 80E3
+        else:
+            print('Sensor Endress não suportado')
+            exit()
+        udP = 0.00055*span_endress
+        dP_mean = np.mean(window_df[sensor_Endress])
+        dP = unc.ufloat(dP_mean,udP)
+        print(sensor_Endress)
+        print(f'dP: {dP:.3f}')
     # Incerteza de Alpha estimada
     uAlpha = resumo_df['Alpha'].iloc[0] * 0.05 # Padrão de 5 % da média do alpha
     Alpha = unc.ufloat(resumo_df['Alpha'].iloc[0],uAlpha)
@@ -254,7 +276,11 @@ def uncertainties_calc(resumo_df,window_df):
     print('P: ', P)
     
     # Cálculo da incerteza da densidade do gás
-    M_ar = 28.96e-3 #[kg/kmol]			    # Massa molecular do ar em [kg/kmol] 
+    if fluid_1 == 'Air': M_ar = 28.96e-3 #[kg/kmol]			    # Massa molecular do ar em [kg/kmol] 
+    elif fluid_1 == 'SF6': M_ar = 146.06e-3 #[kg/kmol]			    # Massa molecular do SF6 em [kg/kmol] 
+    else:
+        print('Fluido 1 não suportado')
+        exit()
     R = 8.314 #[kJ/kmolK]				    # Constante universal dos gases [kJ/kmol.K] 
     rho_G = (P * M_ar) / (R * T_abs)	# Densidade média do ar em [kg/m^3] 
     u_rho_g = rho_G.std_dev
@@ -285,10 +311,10 @@ def uncertainties_calc(resumo_df,window_df):
     
     # Cálculo da incerteza do friccional
             
-    if direction in ['Upward', 'Horizontal']:
+    if direction in ['Upward']:
         dPf_dz = (dP/L_) - ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
         dPt_dz = dPf_dz + dPg_dz
-    elif direction == 'Downward':
+    elif direction == ['Downward','Horizontal']:
         print('Downward')
         dPf_dz = -(dP/L_) + ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
         dPt_dz = -(abs(dPf_dz)) + dPg_dz
@@ -303,19 +329,35 @@ def uncertainties_calc(resumo_df,window_df):
     udPt_dz = dPt_dz.std_dev
 
     # Adicionar a incerteza ao resumo_df logo após a coluna dP_F_dz do sensor Yokogawa
-    col_name = f'dP_F/dz {sensor_Yokogawa}'
-    unc_col_name = f'udP_F_dz_{sensor_Yokogawa}'
-    if col_name in resumo_df.columns:
-        items = list(resumo_df.iloc[0].items())
-        idx = [i for i, (k, v) in enumerate(items) if k == col_name]
-        if idx:
-            insert_pos = idx[0] + 1
-            items.insert(insert_pos, (unc_col_name, udPf_dz))
-            resumo_df = pd.DataFrame([dict(items)])
+    if sensor_Yokogawa != None:
+        col_name = f'dP_F/dz {sensor_Yokogawa}'
+        unc_col_name = f'udP_F_dz_{sensor_Yokogawa}'
+        if col_name in resumo_df.columns:
+            items = list(resumo_df.iloc[0].items())
+            idx = [i for i, (k, v) in enumerate(items) if k == col_name]
+            if idx:
+                insert_pos = idx[0] + 1
+                items.insert(insert_pos, (unc_col_name, udPf_dz))
+                resumo_df = pd.DataFrame([dict(items)])
+            else:
+                resumo_df[unc_col_name] = udPf_dz
         else:
             resumo_df[unc_col_name] = udPf_dz
-    else:
-        resumo_df[unc_col_name] = udPf_dz
+    if sensor_Endress != None:
+        col_name = f'dP_F/dz {sensor_Endress}'
+        unc_col_name = f'udP_F_dz_{sensor_Endress}'
+        if col_name in resumo_df.columns:
+            items = list(resumo_df.iloc[0].items())
+            idx = [i for i, (k, v) in enumerate(items) if k == col_name]
+            if idx:
+                insert_pos = idx[0] + 1
+                items.insert(insert_pos, (unc_col_name, udPf_dz))
+                resumo_df = pd.DataFrame([dict(items)])
+            else:
+                resumo_df[unc_col_name] = udPf_dz
+        else:
+            resumo_df[unc_col_name] = udPf_dz
+
 
     # Adicionar a incerteza ao resumo_df logo após a coluna Alpha
     alpha_col_name = 'Alpha'
@@ -348,19 +390,35 @@ def uncertainties_calc(resumo_df,window_df):
         resumo_df[grav_unc_col_name] = udPg_dz
 
     # Adicionar a incerteza ao resumo_df logo após a coluna dP_dz_total do sensor Yokogawa
-    total_col_name = f'dP_dz_total_{sensor_Yokogawa}'
-    total_unc_col_name = f'udP_dz_total_{sensor_Yokogawa}'
-    if total_col_name in resumo_df.columns:
-        items = list(resumo_df.iloc[0].items())
-        idx = [i for i, (k, v) in enumerate(items) if k == total_col_name]
-        if idx:
-            insert_pos = idx[0] + 1
-            items.insert(insert_pos, (total_unc_col_name, udPt_dz))
-            resumo_df = pd.DataFrame([dict(items)])
+    if sensor_Yokogawa != None:
+        total_col_name = f'dP_dz_total_{sensor_Yokogawa}'
+        total_unc_col_name = f'udP_dz_total_{sensor_Yokogawa}'
+        if total_col_name in resumo_df.columns:
+            items = list(resumo_df.iloc[0].items())
+            idx = [i for i, (k, v) in enumerate(items) if k == total_col_name]
+            if idx:
+                insert_pos = idx[0] + 1
+                items.insert(insert_pos, (total_unc_col_name, udPt_dz))
+                resumo_df = pd.DataFrame([dict(items)])
+            else:
+                resumo_df[total_unc_col_name] = udPt_dz
         else:
             resumo_df[total_unc_col_name] = udPt_dz
-    else:
-        resumo_df[total_unc_col_name] = udPt_dz
+            
+    if sensor_Endress != None:
+        total_col_name = f'dP_dz_total_{sensor_Endress}'
+        total_unc_col_name = f'udP_dz_total_{sensor_Endress}'
+        if total_col_name in resumo_df.columns:
+            items = list(resumo_df.iloc[0].items())
+            idx = [i for i, (k, v) in enumerate(items) if k == total_col_name]
+            if idx:
+                insert_pos = idx[0] + 1
+                items.insert(insert_pos, (total_unc_col_name, udPt_dz))
+                resumo_df = pd.DataFrame([dict(items)])
+            else:
+                resumo_df[total_unc_col_name] = udPt_dz
+        else:
+            resumo_df[total_unc_col_name] = udPt_dz
 
     return resumo_df
 
@@ -736,8 +794,8 @@ def calc_frictional_pressure_gradient(df, colunas, start_idx, end_idx, best_wind
         pressao_gas_parede_pa = (pressao_gas_parede_bar + 1) * 1e5
         temp_gas_parede_k = temp_gas_parede_celsius + 273.15
         
-        rho_gas = [PropsSI('D', 'P', p, 'T', t, 'Air') for p, t in zip(pressao_gas_pa, temp_gas_k)]
-        rho_gas_parede = [PropsSI('D', 'P', p, 'T', t, 'Air') for p, t in zip(pressao_gas_parede_pa, temp_gas_parede_k)]
+        rho_gas = [PropsSI('D', 'P', p, 'T', t, fluid_1) for p, t in zip(pressao_gas_pa, temp_gas_k)]
+        rho_gas_parede = [PropsSI('D', 'P', p, 'T', t, fluid_1) for p, t in zip(pressao_gas_parede_pa, temp_gas_parede_k)]
         rho_gas = pd.Series(rho_gas, index=pressao_gas_pa.index)
         rho_gas_parede = pd.Series(rho_gas_parede, index=pressao_gas_parede_pa.index)
     
@@ -772,11 +830,11 @@ def calc_frictional_pressure_gradient(df, colunas, start_idx, end_idx, best_wind
         termo_gravitacional = ((1-alpha_series)*rho_liquido + alpha_series*rho_gas - rho_tubbing) * g * np.sin(theta_rad)
         dP_dz_gravitacional = ((1-alpha_series)*rho_liquido + alpha_series*rho_gas) * g * np.sin(theta_rad)
 
-        if direction in ['Upward', 'Horizontal']:
+        if direction in ['Upward']:
             dP_F_over_dz_series = (delta_p_prime / L) - termo_gravitacional
             dP_F_over_dz_RMS = np.sqrt(np.mean(np.square(dP_F_over_dz_series)))
             dP_dz_total = dP_F_over_dz_RMS + np.mean(dP_dz_gravitacional)
-        elif direction == 'Downward':
+        elif direction == ['Downward','Horizontal']:
             dP_F_over_dz_series = -(delta_p_prime / L) + termo_gravitacional 
             dP_F_over_dz_RMS = np.sqrt(np.mean(np.square(dP_F_over_dz_series)))
             dP_dz_total = -(dP_F_over_dz_RMS) + np.mean(dP_dz_gravitacional)
@@ -795,8 +853,10 @@ def calc_frictional_pressure_gradient(df, colunas, start_idx, end_idx, best_wind
 def extract_info_from_filename(filename: str):
     """
     Extrai informações do nome do arquivo experimental.
+    Se houver texto antes do hífen '-', ignora esse texto e considera apenas após o hífen.
     Se começar com 'V', desloca a leitura em uma casa (ponto de validação).
-    Formato esperado: [V]XXX##ID## onde:
+    Formato esperado: [prefixo-][V]XXX##ID## onde:
+    - prefixo: texto opcional antes do hífen (será ignorado)
     - X: letra indicando o fluido (A:Air, W:Water, O:Oil, S:SF6)
     - #: número indicando a inclinação em graus
     - ID: identificador do ponto experimental
@@ -814,6 +874,10 @@ def extract_info_from_filename(filename: str):
         'D': 'Downward'
     }
     base_name = os.path.splitext(os.path.basename(filename))[0]
+    
+    # Se houver hífen, considerar apenas a parte após o primeiro hífen
+    if '-' in base_name:
+        base_name = base_name.split('-', 1)[1]
     
     offset = 1 if base_name[0] == 'V' else 0
     is_validation = base_name[0] == 'V'
@@ -996,7 +1060,7 @@ if __name__ == "__main__":
             temp_gas_celsius_full = df[temperatura_mesa]
             pressao_gas_pa_full = (pressao_gas_bar_full + 1) * 1e5
             temp_gas_k_full = temp_gas_celsius_full + 273.15
-            rho_g_full = [PropsSI('D', 'P', p, 'T', t, 'Air') for p, t in zip(pressao_gas_pa_full, temp_gas_k_full)]
+            rho_g_full = [PropsSI('D', 'P', p, 'T', t, fluid_1) for p, t in zip(pressao_gas_pa_full, temp_gas_k_full)]
             df['rho_g'] = rho_g_full
         except Exception as e:
             # Garantir que os dados são numéricos
@@ -1010,7 +1074,7 @@ if __name__ == "__main__":
             temp_gas_parede_celsius_full = df[temperatura_parede]
             pressao_gas_parede_pa_full = (pressao_gas_parede_bar_full + 1) * 1e5
             temp_gas_parede_k_full = temp_gas_parede_celsius_full + 273.15
-            rho_g_parede_full = [PropsSI('D', 'P', p, 'T', t, 'Air') for p, t in zip(pressao_gas_parede_pa_full, temp_gas_parede_k_full)]
+            rho_g_parede_full = [PropsSI('D', 'P', p, 'T', t, fluid_1) for p, t in zip(pressao_gas_parede_pa_full, temp_gas_parede_k_full)]
             df['rho_g_parede'] = rho_g_parede_full
         except Exception as e:
             # Garantir que os dados são numéricos
