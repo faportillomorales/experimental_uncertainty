@@ -10,7 +10,7 @@ import sys
 ####################################################################################################################################################
 #                                            INPUTS
 ####################################################################################################################################################
-file_path = 'data_example/example/PGD/PGD-SOU45P01/PGD-SOU45P01.txt' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
+file_path = 'data_example/example/SF6/Teste-SOH00P01/Teste-SOH00P01' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
 
 L = 1.70         # m comprimento entre as tomadas de diferencial de pressão
 
@@ -19,22 +19,22 @@ L = 1.70         # m comprimento entre as tomadas de diferencial de pressão
 I_G = None  # Será preenchido automaticamente
 I_L = None  # Será preenchido automaticamente
 
-sensor_Yokogawa = None
-sensor_Endress = 'PDT-M-0101C-3kPa_mA'
+sensor_Yokogawa = 'PDT-M-0101D-10kPa(Pa)'
+sensor_Endress = None #'PDT-M-0101C-3kPa(Pa)'
 
-pressao_mesa = 'PIT-M-0301'
-temperatura_mesa = 'TIT-M-0301'
+pressao_mesa = 'PIT-M-0301(bar)'
+temperatura_mesa = 'TIT-M-0301(C)'
 
-pressao_parede = 'PIT-S-0501'
-temperatura_parede = 'TIT-S-0501'
+pressao_parede = 'PIT-S-0501(bar)'
+temperatura_parede = 'TIT-S-0501(C)'
 ### Colunas de interesse -> Insira o nome das colunas a plotar e avaliar do arquivo .dat
 # Lista de colunas para análise: [nome_coluna, apelido, unidade]
 colunas_analise = [
-    [sensor_Endress, r'\Delta P_{3\,kPa} / L', r'[Pa/m]'],
+    [sensor_Yokogawa, r'\Delta P_{10\,kPa} / L', r'[Pa/m]'],
     ['Alpha', r'\alpha', r''],
-    ['J_Oleo', r'J_{oil}', r'[m/s]'],
-    ['J_SF6', r'J_{SF_6}', r'[m/s]'],
-    ['FT-O-0602', r'Q_{oil}', r'[m³/h]'],
+    ['J_Oil(m/s)', r'J_{oil}', r'[m/s]'],
+    ['J_SF6(m/s)', r'J_{SF_6}', r'[m/s]'],
+    ['FT-O-0602(m3h)', r'Q_{oil}', r'[m³/h]'],
     [pressao_mesa, r'Gauge\ Pressure', r'[Bar]'],
     [temperatura_mesa, r'Temperature', r'[°C]'],
     ['rho_g', r'\rho_{SF_6}', r'[kg/m³]'],
@@ -314,7 +314,7 @@ def uncertainties_calc(resumo_df,window_df):
     if direction in ['Upward']:
         dPf_dz = (dP/L_) - ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
         dPt_dz = dPf_dz + dPg_dz
-    elif direction == ['Downward','Horizontal']:
+    elif direction in ['Downward','Horizontal']:
         print('Downward')
         dPf_dz = -(dP/L_) + ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
         dPt_dz = -(abs(dPf_dz)) + dPg_dz
@@ -834,7 +834,7 @@ def calc_frictional_pressure_gradient(df, colunas, start_idx, end_idx, best_wind
             dP_F_over_dz_series = (delta_p_prime / L) - termo_gravitacional
             dP_F_over_dz_RMS = np.sqrt(np.mean(np.square(dP_F_over_dz_series)))
             dP_dz_total = dP_F_over_dz_RMS + np.mean(dP_dz_gravitacional)
-        elif direction == ['Downward','Horizontal']:
+        elif direction in ['Downward','Horizontal']:
             dP_F_over_dz_series = -(delta_p_prime / L) + termo_gravitacional 
             dP_F_over_dz_RMS = np.sqrt(np.mean(np.square(dP_F_over_dz_series)))
             dP_dz_total = -(dP_F_over_dz_RMS) + np.mean(dP_dz_gravitacional)
