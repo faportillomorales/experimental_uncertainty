@@ -10,17 +10,18 @@ import sys
 ####################################################################################################################################################
 #                                            INPUTS
 ####################################################################################################################################################
-file_path = 'data_example/example/SF6/Teste-SOH00P01/Teste-SOH00P01' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
+file_path = 'data_example/example/SF6/validacao/VSOH00P05/VSOH00P05' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
 
 L = 1.70         # m comprimento entre as tomadas de diferencial de pressão
-
+L2 = 2.5         # m comprimento entre as tomadas de diferencial de pressão LEFT AND RIGHT ENDRESS
 # Valores de calibração do densitômetro IMPORTANTE
 # Serão lidos automaticamente da primeira linha da coluna Comment
 I_G = None  # Será preenchido automaticamente
 I_L = None  # Será preenchido automaticamente
 
 sensor_Yokogawa = 'PDT-M-0101D-10kPa(Pa)'
-sensor_Endress = None #'PDT-M-0101C-3kPa(Pa)'
+sensor_Endress_top = 'PDT-M-0101C-3kPa(Pa)'
+sensor_Endress_bottom = 'PDT-M-0101B-10kPa(Pa)'
 
 pressao_mesa = 'PIT-M-0301(bar)'
 temperatura_mesa = 'TIT-M-0301(C)'
@@ -31,14 +32,16 @@ temperatura_parede = 'TIT-S-0501(C)'
 # Lista de colunas para análise: [nome_coluna, apelido, unidade]
 colunas_analise = [
     [sensor_Yokogawa, r'\Delta P_{10\,kPa} / L', r'[Pa/m]'],
+    [sensor_Endress_top, r'\Delta P_{10\,kPa} / L2', r'[Pa/m]'],
+    [sensor_Endress_bottom, r'\Delta P_{3\,kPa} / L2', r'[Pa/m]'],
     ['Alpha', r'\alpha', r''],
     ['J_Oil(m/s)', r'J_{oil}', r'[m/s]'],
     ['J_SF6(m/s)', r'J_{SF_6}', r'[m/s]'],
-    ['FT-O-0602(m3h)', r'Q_{oil}', r'[m³/h]'],
+    # ['FT-O-0301(m3h)', r'Q_{oil}', r'[m³/h]'],
     [pressao_mesa, r'Gauge\ Pressure', r'[Bar]'],
     [temperatura_mesa, r'Temperature', r'[°C]'],
     ['rho_g', r'\rho_{SF_6}', r'[kg/m³]'],
-    ['rho_g_parede', r'\rho_{SF_6-parede}', r'[kg/m³]']
+    # ['rho_g_parede', r'\rho_{air-parede}', r'[kg/m³]']
 ]
 ####################################################################################################################################################
 #       '                                   END INPUTS
@@ -228,6 +231,7 @@ def uncertainties_calc(resumo_df,window_df):
      
 
     # Incerteza dos sensores Yokogawa
+    dP_yokogawa = None
     if sensor_Yokogawa != None:
         if '-30' in sensor_Yokogawa:         #### Mudar nome no Labview
             span_yokogawa = 29E3  
@@ -240,25 +244,9 @@ def uncertainties_calc(resumo_df,window_df):
             exit()
         udP = 0.0005*span_yokogawa
         dP_mean = np.mean(window_df[sensor_Yokogawa])
-        dP = unc.ufloat(dP_mean,udP)
+        dP_yokogawa = unc.ufloat(dP_mean,udP)
         print(sensor_Yokogawa)
-        print(f'dP: {dP:.3f}')
-    
-    if sensor_Endress != None:
-        if '-3' in sensor_Endress:
-            span_endress = 6E3
-        elif '-10' in sensor_Endress:
-            span_endress = 20E3
-        elif '-40' in sensor_Endress:
-            span_endress = 80E3
-        else:
-            print('Sensor Endress não suportado')
-            exit()
-        udP = 0.00055*span_endress
-        dP_mean = np.mean(window_df[sensor_Endress])
-        dP = unc.ufloat(dP_mean,udP)
-        print(sensor_Endress)
-        print(f'dP: {dP:.3f}')
+        print(f'dP: {dP_yokogawa:.3f}')
     # Incerteza de Alpha estimada
     uAlpha = resumo_df['Alpha'].iloc[0] * 0.05 # Padrão de 5 % da média do alpha
     Alpha = unc.ufloat(resumo_df['Alpha'].iloc[0],uAlpha)
@@ -304,32 +292,36 @@ def uncertainties_calc(resumo_df,window_df):
     g = 9.81
     uL = 0.5E-3
     L_ = unc.ufloat(L,uL)
+    uL2 = 0.5E-3
+    L2_ = unc.ufloat(L2,uL2)
     # print('L: ', L_)
 
 
     dPg_dz = ((1-Alpha)*rho_L + Alpha*rho_G) * g * np.sin(theta_rad)
     
-    # Cálculo da incerteza do friccional
-            
-    if direction in ['Upward']:
-        dPf_dz = (dP/L_) - ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
-        dPt_dz = dPf_dz + dPg_dz
-    elif direction in ['Downward','Horizontal']:
-        print('Downward')
-        dPf_dz = -(dP/L_) + ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
-        dPt_dz = -(abs(dPf_dz)) + dPg_dz
+    # Cálculo da incerteza do friccional para Yokogawa (usando L)
+    if dP_yokogawa is not None:
+        if direction in ['Upward']:
+            dPf_dz = (dP_yokogawa/L_) - ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
+            dPt_dz = dPf_dz + dPg_dz
+        elif direction in ['Downward','Horizontal']:
+            print('Downward')
+            dPf_dz = -(dP_yokogawa/L_) + ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
+            dPt_dz = -(abs(dPf_dz)) + dPg_dz
+        
+        print(f'dPf_dz (Yokogawa): {dPf_dz:.3f}')
+        print(f'dPg_dz: {dPg_dz:.3f}')
+        print(f'dPt_dz (Yokogawa): {dPt_dz:.3f}')
+        
+        # Alocando as incertezas do Yokogawa
+        udPf_dz_yokogawa = dPf_dz.std_dev
+        udPt_dz_yokogawa = dPt_dz.std_dev
     
-    print(f'dPf_dz: {dPf_dz:.3f}')
-    print(f'dPg_dz: {dPg_dz:.3f}')
-    print(f'dPt_dz: {dPt_dz:.3f}')
-    
-    # Alocando as incetezas
-    udPf_dz = dPf_dz.std_dev
+    # Alocando as incertezas gerais
     udPg_dz = dPg_dz.std_dev
-    udPt_dz = dPt_dz.std_dev
 
     # Adicionar a incerteza ao resumo_df logo após a coluna dP_F_dz do sensor Yokogawa
-    if sensor_Yokogawa != None:
+    if sensor_Yokogawa != None and dP_yokogawa is not None:
         col_name = f'dP_F/dz {sensor_Yokogawa}'
         unc_col_name = f'udP_F_dz_{sensor_Yokogawa}'
         if col_name in resumo_df.columns:
@@ -337,26 +329,55 @@ def uncertainties_calc(resumo_df,window_df):
             idx = [i for i, (k, v) in enumerate(items) if k == col_name]
             if idx:
                 insert_pos = idx[0] + 1
-                items.insert(insert_pos, (unc_col_name, udPf_dz))
+                items.insert(insert_pos, (unc_col_name, udPf_dz_yokogawa))
                 resumo_df = pd.DataFrame([dict(items)])
             else:
-                resumo_df[unc_col_name] = udPf_dz
+                resumo_df[unc_col_name] = udPf_dz_yokogawa
         else:
-            resumo_df[unc_col_name] = udPf_dz
-    if sensor_Endress != None:
-        col_name = f'dP_F/dz {sensor_Endress}'
-        unc_col_name = f'udP_F_dz_{sensor_Endress}'
-        if col_name in resumo_df.columns:
-            items = list(resumo_df.iloc[0].items())
-            idx = [i for i, (k, v) in enumerate(items) if k == col_name]
-            if idx:
-                insert_pos = idx[0] + 1
-                items.insert(insert_pos, (unc_col_name, udPf_dz))
-                resumo_df = pd.DataFrame([dict(items)])
+            resumo_df[unc_col_name] = udPf_dz_yokogawa
+    
+    # Processar sensores Endress (left e right) - usando L2
+    for sensor_Endress in [sensor_Endress_top, sensor_Endress_bottom]:
+        if sensor_Endress is not None:
+            if '-3' in sensor_Endress:
+                span_endress = 6E3
+            elif '-10' in sensor_Endress:
+                span_endress = 20E3
+            elif '-40' in sensor_Endress:
+                span_endress = 80E3
             else:
-                resumo_df[unc_col_name] = udPf_dz
-        else:
-            resumo_df[unc_col_name] = udPf_dz
+                print(f'Sensor Endress {sensor_Endress} não suportado')
+                continue
+            udP = 0.00055*span_endress
+            dP_mean = np.mean(window_df[sensor_Endress])
+            dP_endress = unc.ufloat(dP_mean,udP)
+            print(sensor_Endress)
+            print(f'dP: {dP_endress:.3f}')
+            
+            # Calcular incertezas para este sensor Endress usando L2
+            if direction in ['Upward']:
+                dPf_dz_endress = (dP_endress/L2_) - ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
+                dPt_dz_endress = dPf_dz_endress + dPg_dz
+            elif direction in ['Downward','Horizontal']:
+                dPf_dz_endress = -(dP_endress/L2_) + ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
+                dPt_dz_endress = -(abs(dPf_dz_endress)) + dPg_dz
+            
+            udPf_dz_endress = dPf_dz_endress.std_dev
+            udPt_dz_endress = dPt_dz_endress.std_dev
+            
+            col_name = f'dP_F/dz {sensor_Endress}'
+            unc_col_name = f'udP_F_dz_{sensor_Endress}'
+            if col_name in resumo_df.columns:
+                items = list(resumo_df.iloc[0].items())
+                idx = [i for i, (k, v) in enumerate(items) if k == col_name]
+                if idx:
+                    insert_pos = idx[0] + 1
+                    items.insert(insert_pos, (unc_col_name, udPf_dz_endress))
+                    resumo_df = pd.DataFrame([dict(items)])
+                else:
+                    resumo_df[unc_col_name] = udPf_dz_endress
+            else:
+                resumo_df[unc_col_name] = udPf_dz_endress
 
 
     # Adicionar a incerteza ao resumo_df logo após a coluna Alpha
@@ -390,7 +411,7 @@ def uncertainties_calc(resumo_df,window_df):
         resumo_df[grav_unc_col_name] = udPg_dz
 
     # Adicionar a incerteza ao resumo_df logo após a coluna dP_dz_total do sensor Yokogawa
-    if sensor_Yokogawa != None:
+    if sensor_Yokogawa != None and dP_yokogawa is not None:
         total_col_name = f'dP_dz_total_{sensor_Yokogawa}'
         total_unc_col_name = f'udP_dz_total_{sensor_Yokogawa}'
         if total_col_name in resumo_df.columns:
@@ -398,27 +419,52 @@ def uncertainties_calc(resumo_df,window_df):
             idx = [i for i, (k, v) in enumerate(items) if k == total_col_name]
             if idx:
                 insert_pos = idx[0] + 1
-                items.insert(insert_pos, (total_unc_col_name, udPt_dz))
+                items.insert(insert_pos, (total_unc_col_name, udPt_dz_yokogawa))
                 resumo_df = pd.DataFrame([dict(items)])
             else:
-                resumo_df[total_unc_col_name] = udPt_dz
+                resumo_df[total_unc_col_name] = udPt_dz_yokogawa
         else:
-            resumo_df[total_unc_col_name] = udPt_dz
+            resumo_df[total_unc_col_name] = udPt_dz_yokogawa
             
-    if sensor_Endress != None:
-        total_col_name = f'dP_dz_total_{sensor_Endress}'
-        total_unc_col_name = f'udP_dz_total_{sensor_Endress}'
-        if total_col_name in resumo_df.columns:
-            items = list(resumo_df.iloc[0].items())
-            idx = [i for i, (k, v) in enumerate(items) if k == total_col_name]
-            if idx:
-                insert_pos = idx[0] + 1
-                items.insert(insert_pos, (total_unc_col_name, udPt_dz))
-                resumo_df = pd.DataFrame([dict(items)])
+    # Processar sensores Endress (left e right) - as incertezas já foram calculadas no loop anterior
+    for sensor_Endress in [sensor_Endress_top, sensor_Endress_bottom]:
+        if sensor_Endress is not None:
+            # Recalcular para obter as incertezas (já calculadas acima, mas precisamos acessá-las)
+            if '-3' in sensor_Endress:
+                span_endress = 6E3
+            elif '-10' in sensor_Endress:
+                span_endress = 20E3
+            elif '-40' in sensor_Endress:
+                span_endress = 80E3
             else:
-                resumo_df[total_unc_col_name] = udPt_dz
-        else:
-            resumo_df[total_unc_col_name] = udPt_dz
+                continue
+            udP = 0.00055*span_endress
+            dP_mean = np.mean(window_df[sensor_Endress])
+            dP_endress = unc.ufloat(dP_mean,udP)
+            
+            # Calcular incertezas para este sensor Endress usando L2
+            if direction in ['Upward']:
+                dPf_dz_endress = (dP_endress/L2_) - ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
+                dPt_dz_endress = dPf_dz_endress + dPg_dz
+            elif direction in ['Downward','Horizontal']:
+                dPf_dz_endress = -(dP_endress/L2_) + ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
+                dPt_dz_endress = -(abs(dPf_dz_endress)) + dPg_dz
+            
+            udPt_dz_endress = dPt_dz_endress.std_dev
+            
+            total_col_name = f'dP_dz_total_{sensor_Endress}'
+            total_unc_col_name = f'udP_dz_total_{sensor_Endress}'
+            if total_col_name in resumo_df.columns:
+                items = list(resumo_df.iloc[0].items())
+                idx = [i for i, (k, v) in enumerate(items) if k == total_col_name]
+                if idx:
+                    insert_pos = idx[0] + 1
+                    items.insert(insert_pos, (total_unc_col_name, udPt_dz_endress))
+                    resumo_df = pd.DataFrame([dict(items)])
+                else:
+                    resumo_df[total_unc_col_name] = udPt_dz_endress
+            else:
+                resumo_df[total_unc_col_name] = udPt_dz_endress
 
     return resumo_df
 
@@ -610,7 +656,14 @@ def plot_time_series(df, colunas, output_dir, base_name):
         col = idx % n_colunas
         ax = axs[linha, col] if n_linhas > 1 else axs[col]
         if nome_coluna.startswith('PDT-'):
-            y_data = df[nome_coluna]/L
+            # Determinar qual comprimento usar (L para Yokogawa, L2 para Endress)
+            if nome_coluna == sensor_Yokogawa:
+                comprimento = L
+            elif nome_coluna in [sensor_Endress_top, sensor_Endress_bottom]:
+                comprimento = L2
+            else:
+                comprimento = L  # Padrão para outros sensores PDT
+            y_data = df[nome_coluna]/comprimento
             rms_pdt = np.sqrt(np.mean(np.square(y_data)))
             ax.plot(df['X_Value'], y_data, 'b-', alpha=0.8)
         else:
@@ -677,8 +730,15 @@ def plot_windows(df, colunas, start_idx, end_idx, best_window_size, output_dir, 
         ax = axs[linha, col] if n_linhas > 1 else axs[col]
         nome_coluna = coluna
         if nome_coluna.startswith('PDT-'):
-            y_data = (df[nome_coluna].iloc[start_idx:end_idx])/L
-            y_data_full = (df[nome_coluna])/L
+            # Determinar qual comprimento usar (L para Yokogawa, L2 para Endress)
+            if nome_coluna == sensor_Yokogawa:
+                comprimento = L
+            elif nome_coluna in [sensor_Endress_top, sensor_Endress_bottom]:
+                comprimento = L2
+            else:
+                comprimento = L  # Padrão para outros sensores PDT
+            y_data = (df[nome_coluna].iloc[start_idx:end_idx])/comprimento
+            y_data_full = (df[nome_coluna])/comprimento
             rms_pdt_win = np.sqrt(np.mean(np.square(y_data)))
             ax.plot(df['X_Value'], y_data_full, 'b-', alpha=0.3, label='Full Series (abs)')
             ax.plot(df['X_Value'].iloc[start_idx:end_idx], y_data, 'r-', alpha=0.8, label=f'Window = {best_window_size:.0f} s')
@@ -827,15 +887,23 @@ def calc_frictional_pressure_gradient(df, colunas, start_idx, end_idx, best_wind
         
         delta_p_prime = df[coluna_pdt_nome].iloc[start_idx:end_idx]
         
+        # Determinar qual comprimento usar (L para Yokogawa, L2 para Endress)
+        if coluna_pdt_nome == sensor_Yokogawa:
+            comprimento = L
+        elif coluna_pdt_nome in [sensor_Endress_top, sensor_Endress_bottom]:
+            comprimento = L2
+        else:
+            comprimento = L  # Padrão para outros sensores PDT
+        
         termo_gravitacional = ((1-alpha_series)*rho_liquido + alpha_series*rho_gas - rho_tubbing) * g * np.sin(theta_rad)
         dP_dz_gravitacional = ((1-alpha_series)*rho_liquido + alpha_series*rho_gas) * g * np.sin(theta_rad)
 
         if direction in ['Upward']:
-            dP_F_over_dz_series = (delta_p_prime / L) - termo_gravitacional
+            dP_F_over_dz_series = (delta_p_prime / comprimento) - termo_gravitacional
             dP_F_over_dz_RMS = np.sqrt(np.mean(np.square(dP_F_over_dz_series)))
             dP_dz_total = dP_F_over_dz_RMS + np.mean(dP_dz_gravitacional)
         elif direction in ['Downward','Horizontal']:
-            dP_F_over_dz_series = -(delta_p_prime / L) + termo_gravitacional 
+            dP_F_over_dz_series = -(delta_p_prime / comprimento) + termo_gravitacional 
             dP_F_over_dz_RMS = np.sqrt(np.mean(np.square(dP_F_over_dz_series)))
             dP_dz_total = -(dP_F_over_dz_RMS) + np.mean(dP_dz_gravitacional)
 
@@ -946,7 +1014,7 @@ def plot_alpha(df: pd.DataFrame, start_idx: int, end_idx: int, output_dir: str, 
     else:
         return None
 
-def plot_pressure_gradients(df: pd.DataFrame, dP_F_df: pd.DataFrame, start_idx: int, end_idx: int, output_dir: str, base_name: str, sensor_Yokogawa: str, sensor_Endress: str, direction: str):
+def plot_pressure_gradients(df: pd.DataFrame, dP_F_df: pd.DataFrame, start_idx: int, end_idx: int, output_dir: str, base_name: str, sensor_Yokogawa: str, sensor_Endress_top: str, sensor_Endress_bottom: str, direction: str):
     """
     Plota as séries temporais de gradientes de pressão e salva a imagem.
     
@@ -958,7 +1026,8 @@ def plot_pressure_gradients(df: pd.DataFrame, dP_F_df: pd.DataFrame, start_idx: 
         output_dir (str): Diretório para salvar a imagem
         base_name (str): Nome base para o arquivo de saída
         sensor_Yokogawa (str): Nome do sensor Yokogawa
-        sensor_Endress (str): Nome do sensor Endress
+        sensor_Endress_top (str): Nome do sensor Endress left
+        sensor_Endress_bottom (str): Nome do sensor Endress right
         direction (str): Direção do escoamento
     """
     if dP_F_df is not None and not dP_F_df.empty:
@@ -976,7 +1045,7 @@ def plot_pressure_gradients(df: pd.DataFrame, dP_F_df: pd.DataFrame, start_idx: 
                 if col == sensor_Yokogawa:
                     sensor_range = col.split('-')[3]
                     label_base = f'Yokogawa {sensor_range}'
-                elif col == sensor_Endress:
+                elif col in [sensor_Endress_top, sensor_Endress_bottom]:
                     sensor_range = col.split('-')[3]
                     label_base = f'Endress {sensor_range}'
                 else:
@@ -994,7 +1063,7 @@ def plot_pressure_gradients(df: pd.DataFrame, dP_F_df: pd.DataFrame, start_idx: 
                 if sensor_name == sensor_Yokogawa:
                     sensor_range = sensor_name.split('-')[3]
                     label_base = f'Yokogawa {sensor_range}'
-                elif sensor_name == sensor_Endress:
+                elif sensor_name in [sensor_Endress_top, sensor_Endress_bottom]:
                     sensor_range = sensor_name.split('-')[3]
                     label_base = f'Endress {sensor_range}'
                 else:
@@ -1199,7 +1268,7 @@ if __name__ == "__main__":
                 nomes=colunas_analise_filtradas, medias=medias, desvios=desvios, uAs=uAs,
                 escolha_janela=escolha_janela)
     
-    plot_pressure_gradients(df, dP_F_df, start_idx, end_idx, output_dir, base_name, sensor_Yokogawa, sensor_Endress, direction)
+    plot_pressure_gradients(df, dP_F_df, start_idx, end_idx, output_dir, base_name, sensor_Yokogawa, sensor_Endress_top, sensor_Endress_bottom, direction)
     print("Arquivo excel dos dados tratados criado...")
 
 
