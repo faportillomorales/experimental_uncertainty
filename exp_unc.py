@@ -10,35 +10,38 @@ import sys
 ####################################################################################################################################################
 #                                            INPUTS
 ####################################################################################################################################################
-file_path = 'C:/FSC2/TESTES DE OLEO/AOH00/AOH00T02/AOH00T02-teste' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
+file_path = 'data_example/example/SF6/validacao/VSOH00P05/VSOH00P05' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
 
 L = 1.70         # m comprimento entre as tomadas de diferencial de pressão
-
+L2 = 2.5         # m comprimento entre as tomadas de diferencial de pressão LEFT AND RIGHT ENDRESS
 # Valores de calibração do densitômetro IMPORTANTE
 # Serão lidos automaticamente da primeira linha da coluna Comment
 I_G = None  # Será preenchido automaticamente
 I_L = None  # Será preenchido automaticamente
 
-sensor_Yokogawa = 'PDT-M-0101D-30kPa'
-sensor_Endress = 'PDT-M-0101-40kPa(Pa)'
+sensor_Yokogawa = 'PDT-M-0101D-10kPa(Pa)'
+sensor_Endress_left = 'PDT-M-0101C-3kPa(Pa)'
+sensor_Endress_right = 'PDT-M-0101B-10kPa(Pa)'
 
-pressao_mesa = 'PIT-M-0101(bar)'
-temperatura_mesa = 'TIT-M-0101(C)'
+pressao_mesa = 'PIT-M-0301(bar)'
+temperatura_mesa = 'TIT-M-0301(C)'
 
-pressao_parede = 'PIT-A-0301(bar)'
-temperatura_parede = 'TIT-A-0301(C)'
+pressao_parede = 'PIT-S-0501(bar)'
+temperatura_parede = 'TIT-S-0501(C)'
 ### Colunas de interesse -> Insira o nome das colunas a plotar e avaliar do arquivo .dat
 # Lista de colunas para análise: [nome_coluna, apelido, unidade]
 colunas_analise = [
-    [sensor_Yokogawa, r'\Delta P_{30\,kPa} / L', r'[Pa/m]'],
+    [sensor_Yokogawa, r'\Delta P_{10\,kPa} / L', r'[Pa/m]'],
+    [sensor_Endress_left, r'\Delta P_{3\,kPa} / L2', r'[Pa/m]'],
+    [sensor_Endress_right, r'\Delta P_{10\,kPa} / L2', r'[Pa/m]'],
     ['Alpha', r'\alpha', r''],
     ['J_Oil(m/s)', r'J_{oil}', r'[m/s]'],
-    ['J_Air(m/s)', r'J_{air}', r'[m/s]'],
-    ['FT-O-0301(m3h)', r'Q_{oil}', r'[m³/h]'],
+    ['J_SF6(m/s)', r'J_{SF_6}', r'[m/s]'],
+    # ['FT-O-0301(m3h)', r'Q_{oil}', r'[m³/h]'],
     [pressao_mesa, r'Gauge\ Pressure', r'[Bar]'],
     [temperatura_mesa, r'Temperature', r'[°C]'],
-    ['rho_g', r'\rho_{air}', r'[kg/m³]'],
-    ['rho_g_parede', r'\rho_{air-parede}', r'[kg/m³]']
+    ['rho_g', r'\rho_{SF_6}', r'[kg/m³]'],
+    # ['rho_g_parede', r'\rho_{air-parede}', r'[kg/m³]']
 ]
 ####################################################################################################################################################
 #       '                                   END INPUTS
@@ -285,10 +288,10 @@ def uncertainties_calc(resumo_df,window_df):
     
     # Cálculo da incerteza do friccional
             
-    if direction in ['Upward', 'Horizontal']:
+    if direction in ['Upward']:
         dPf_dz = (dP/L_) - ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
         dPt_dz = dPf_dz + dPg_dz
-    elif direction == 'Downward':
+    elif direction in ['Downward', 'Horizontal']:
         print('Downward')
         dPf_dz = -(dP/L_) + ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
         dPt_dz = -(abs(dPf_dz)) + dPg_dz
@@ -453,7 +456,7 @@ def save_results(df: pd.DataFrame, coluna_escolhida: str, start_idx: int, end_id
             dP_F_series = window_data[dP_F_col]
             dP_F_RMS = np.sqrt(np.mean(np.square(dP_F_series)))
             grav_term = medias_janela['dP_F/dz dP_dz_gravitacional']
-            if direction in ['Upward', 'Horizontal']:
+            if direction in ['Upward']:
                 dP_dz_total = dP_F_RMS + grav_term
             else:
                 dP_dz_total = -dP_F_RMS + grav_term
@@ -552,7 +555,14 @@ def plot_time_series(df, colunas, output_dir, base_name):
         col = idx % n_colunas
         ax = axs[linha, col] if n_linhas > 1 else axs[col]
         if nome_coluna.startswith('PDT-'):
-            y_data = df[nome_coluna]/L
+            # Determinar qual comprimento usar (L para Yokogawa, L2 para Endress)
+            if nome_coluna == sensor_Yokogawa:
+                comprimento = L
+            elif nome_coluna in [sensor_Endress_left, sensor_Endress_right]:
+                comprimento = L2
+            else:
+                comprimento = L  # Padrão para outros sensores PDT
+            y_data = df[nome_coluna]/comprimento
             rms_pdt = np.sqrt(np.mean(np.square(y_data)))
             ax.plot(df['X_Value'], y_data, 'b-', alpha=0.8)
         else:
@@ -619,8 +629,15 @@ def plot_windows(df, colunas, start_idx, end_idx, best_window_size, output_dir, 
         ax = axs[linha, col] if n_linhas > 1 else axs[col]
         nome_coluna = coluna
         if nome_coluna.startswith('PDT-'):
-            y_data = (df[nome_coluna].iloc[start_idx:end_idx])/L
-            y_data_full = (df[nome_coluna])/L
+            # Determinar qual comprimento usar (L para Yokogawa, L2 para Endress)
+            if nome_coluna == sensor_Yokogawa:
+                comprimento = L
+            elif nome_coluna in [sensor_Endress_left, sensor_Endress_right]:
+                comprimento = L2
+            else:
+                comprimento = L  # Padrão para outros sensores PDT
+            y_data = (df[nome_coluna].iloc[start_idx:end_idx])/comprimento
+            y_data_full = (df[nome_coluna])/comprimento
             rms_pdt_win = np.sqrt(np.mean(np.square(y_data)))
             ax.plot(df['X_Value'], y_data_full, 'b-', alpha=0.3, label='Full Series (abs)')
             ax.plot(df['X_Value'].iloc[start_idx:end_idx], y_data, 'r-', alpha=0.8, label=f'Window = {best_window_size:.0f} s')
@@ -769,15 +786,23 @@ def calc_frictional_pressure_gradient(df, colunas, start_idx, end_idx, best_wind
         
         delta_p_prime = df[coluna_pdt_nome].iloc[start_idx:end_idx]
         
+        # Determinar qual comprimento usar (L para Yokogawa, L2 para Endress)
+        if coluna_pdt_nome == sensor_Yokogawa:
+            comprimento = L
+        elif coluna_pdt_nome in [sensor_Endress_left, sensor_Endress_right]:
+            comprimento = L2
+        else:
+            comprimento = L  # Padrão para outros sensores PDT
+        
         termo_gravitacional = ((1-alpha_series)*rho_liquido + alpha_series*rho_gas - rho_tubbing) * g * np.sin(theta_rad)
         dP_dz_gravitacional = ((1-alpha_series)*rho_liquido + alpha_series*rho_gas) * g * np.sin(theta_rad)
 
-        if direction in ['Upward', 'Horizontal']:
-            dP_F_over_dz_series = (delta_p_prime / L) - termo_gravitacional
+        if direction in ['Upward']:
+            dP_F_over_dz_series = (delta_p_prime / comprimento) - termo_gravitacional
             dP_F_over_dz_RMS = np.sqrt(np.mean(np.square(dP_F_over_dz_series)))
             dP_dz_total = dP_F_over_dz_RMS + np.mean(dP_dz_gravitacional)
-        elif direction == 'Downward':
-            dP_F_over_dz_series = -(delta_p_prime / L) + termo_gravitacional 
+        elif direction in ['Downward', 'Horizontal']:
+            dP_F_over_dz_series = -(delta_p_prime / comprimento) + termo_gravitacional 
             dP_F_over_dz_RMS = np.sqrt(np.mean(np.square(dP_F_over_dz_series)))
             dP_dz_total = -(dP_F_over_dz_RMS) + np.mean(dP_dz_gravitacional)
 
@@ -882,7 +907,7 @@ def plot_alpha(df: pd.DataFrame, start_idx: int, end_idx: int, output_dir: str, 
     else:
         return None
 
-def plot_pressure_gradients(df: pd.DataFrame, dP_F_df: pd.DataFrame, start_idx: int, end_idx: int, output_dir: str, base_name: str, sensor_Yokogawa: str, sensor_Endress: str, direction: str):
+def plot_pressure_gradients(df: pd.DataFrame, dP_F_df: pd.DataFrame, start_idx: int, end_idx: int, output_dir: str, base_name: str, sensor_Yokogawa: str, sensor_Endress_left: str, sensor_Endress_right: str, direction: str):
     """
     Plota as séries temporais de gradientes de pressão e salva a imagem.
     
@@ -894,7 +919,8 @@ def plot_pressure_gradients(df: pd.DataFrame, dP_F_df: pd.DataFrame, start_idx: 
         output_dir (str): Diretório para salvar a imagem
         base_name (str): Nome base para o arquivo de saída
         sensor_Yokogawa (str): Nome do sensor Yokogawa
-        sensor_Endress (str): Nome do sensor Endress
+        sensor_Endress_left (str): Nome do sensor Endress left
+        sensor_Endress_right (str): Nome do sensor Endress right
         direction (str): Direção do escoamento
     """
     if dP_F_df is not None and not dP_F_df.empty:
@@ -912,7 +938,7 @@ def plot_pressure_gradients(df: pd.DataFrame, dP_F_df: pd.DataFrame, start_idx: 
                 if col == sensor_Yokogawa:
                     sensor_range = col.split('-')[3]
                     label_base = f'Yokogawa {sensor_range}'
-                elif col == sensor_Endress:
+                elif col in [sensor_Endress_left, sensor_Endress_right]:
                     sensor_range = col.split('-')[3]
                     label_base = f'Endress {sensor_range}'
                 else:
@@ -930,7 +956,7 @@ def plot_pressure_gradients(df: pd.DataFrame, dP_F_df: pd.DataFrame, start_idx: 
                 if sensor_name == sensor_Yokogawa:
                     sensor_range = sensor_name.split('-')[3]
                     label_base = f'Yokogawa {sensor_range}'
-                elif sensor_name == sensor_Endress:
+                elif sensor_name in [sensor_Endress_left, sensor_Endress_right]:
                     sensor_range = sensor_name.split('-')[3]
                     label_base = f'Endress {sensor_range}'
                 else:
@@ -1135,7 +1161,7 @@ if __name__ == "__main__":
                 nomes=colunas_analise_filtradas, medias=medias, desvios=desvios, uAs=uAs,
                 escolha_janela=escolha_janela)
     
-    plot_pressure_gradients(df, dP_F_df, start_idx, end_idx, output_dir, base_name, sensor_Yokogawa, sensor_Endress, direction)
+    plot_pressure_gradients(df, dP_F_df, start_idx, end_idx, output_dir, base_name, sensor_Yokogawa, sensor_Endress_left, sensor_Endress_right, direction)
     print("Arquivo excel dos dados tratados criado...")
 
 
