@@ -20,8 +20,8 @@ I_G = None  # Será preenchido automaticamente
 I_L = None  # Será preenchido automaticamente
 
 sensor_Yokogawa = 'PDT-M-0101D-10kPa(Pa)'
-sensor_Endress_top = 'PDT-M-0101C-3kPa(Pa)'
-sensor_Endress_bottom = 'PDT-M-0101B-10kPa(Pa)'
+sensor_Endress_top = None #'PDT-M-0101C-3kPa(Pa)'
+sensor_Endress_bottom = None #'PDT-M-0101B-10kPa(Pa)'
 
 pressao_mesa = 'PIT-M-0301(bar)'
 temperatura_mesa = 'TIT-M-0301(C)'
@@ -32,33 +32,44 @@ temperatura_parede = 'TIT-S-0501(C)'
 # Lista de colunas para análise: [nome_coluna, apelido, unidade]
 colunas_analise = [
     [sensor_Yokogawa, r'\Delta P_{10\,kPa} / L', r'[Pa/m]'],
-    [sensor_Endress_top, r'\Delta P_{10\,kPa} / L2', r'[Pa/m]'],
-    [sensor_Endress_bottom, r'\Delta P_{3\,kPa} / L2', r'[Pa/m]'],
+    # [sensor_Endress_top, r'\Delta P_{10\,kPa} / L2', r'[Pa/m]'],
+    # [sensor_Endress_bottom, r'\Delta P_{3\,kPa} / L2', r'[Pa/m]'],
     ['Alpha', r'\alpha', r''],
     ['J_Oil(m/s)', r'J_{oil}', r'[m/s]'],
     ['J_SF6(m/s)', r'J_{SF_6}', r'[m/s]'],
-    # ['FT-O-0301(m3h)', r'Q_{oil}', r'[m³/h]'],
     [pressao_mesa, r'Gauge\ Pressure', r'[Bar]'],
     [temperatura_mesa, r'Temperature', r'[°C]'],
     ['rho_g', r'\rho_{SF_6}', r'[kg/m³]'],
-    # ['rho_g_parede', r'\rho_{air-parede}', r'[kg/m³]']
 ]
 ####################################################################################################################################################
 #       '                                   END INPUTS
 ####################################################################################################################################################
+# Constantes físicas
 g = 9.81        # m/s² 
-rho_s = 962     # kg/m³         Densidade do silicone nas tomadas do sensor Yokogawa
+rho_s = 962     # kg/m³ - Densidade do silicone nas tomadas do sensor Yokogawa
 
-def get_constants():
-    """Returns a dictionary of constants used in the script."""
-    return {
-        'g': 9.81,         # m/s² 
-        'rho_s': 962       # kg/m³         Densidade do silicone nas tomadas do sensor Yokogawa
-    }
-
-CONSTANTS = get_constants()
-g = CONSTANTS['g']
-rho_s = CONSTANTS['rho_s']
+def calc_liquid_density(temp_celsius, fluid_2):
+    """
+    Calcula a densidade do líquido baseado na temperatura.
+    
+    Args:
+        temp_celsius: Temperatura em Celsius (pode ser Series, array ou escalar)
+        fluid_2: Tipo de fluido ('Water' ou 'Oil')
+        
+    Returns:
+        Densidade do líquido em kg/m³ (Series se entrada for Series, caso contrário escalar)
+    """
+    if fluid_2 == 'Water':
+        if isinstance(temp_celsius, pd.Series):
+            temp_k = temp_celsius + 273.15
+            return pd.Series([PropsSI('D', 'T', t, 'P', 101325, 'Water') for t in temp_k], index=temp_celsius.index)
+        else:
+            temp_k = temp_celsius + 273.15
+            return PropsSI('D', 'T', temp_k, 'P', 101325, 'Water')
+    elif fluid_2 == 'Oil':
+        return -0.65178 * temp_celsius + 879.76961
+    else:
+        return 1000  # Valor padrão
 
 def find_min_std_window(df: pd.DataFrame, column_name: str, min_window_size: float, max_window_size: float):
     """
@@ -200,40 +211,13 @@ def read_file(file_path: str):
     
     return df, data_teste, i_g, i_l
 
-def format_filename(alias: str, unit: str) -> str:
-    """
-    Formats the filename by removing LaTeX characters and adding the unit.
-    Example: r'\Delta P_{40\,kPa}' [Pa] -> Delta_P_40kPa [Pa]
-    """
-    name = alias.replace('\\', '')
-    name = name.replace('{', '')
-    name = name.replace('}', '')
-    name = name.replace('\\,', '')
-    name = name.replace('\\frac', '')
-    name = name.replace('$', '')
-    
-    invalid_chars = ['|', '/', '\\', ':', '*', '?', '"', '<', '>', ',', ';', '=', ' ']
-    for char in invalid_chars:
-        name = name.replace(char, '_')
-    
-    while '__' in name:
-        name = name.replace('__', '_')
-    
-    name = name.strip('_')
-    
-    if unit:
-        unit = unit.replace('[', '').replace(']', '')
-        name = f"{name}_{unit}"
-    
-    return name
-
 def uncertainties_calc(resumo_df,window_df):
      
 
     # Incerteza dos sensores Yokogawa
     dP_yokogawa = None
-    if sensor_Yokogawa != None:
-        if '-30' in sensor_Yokogawa:         #### Mudar nome no Labview
+    if sensor_Yokogawa is not None:
+        if '-30' in sensor_Yokogawa:
             span_yokogawa = 29E3  
         elif '-10' in sensor_Yokogawa:
             span_yokogawa = 9E3    
@@ -256,7 +240,6 @@ def uncertainties_calc(resumo_df,window_df):
     uT = 0.15 + 0.02*T_mean
     T = unc.ufloat(T_mean,uT)
     T_abs = T + 273.15
-    # print('T: ', T)
 
     P_mean = (resumo_df[pressao_mesa].iloc[0] + 1) * 1E5            #Absolute pressure in Pa
     uP = 0.0025*P_mean
@@ -285,28 +268,27 @@ def uncertainties_calc(resumo_df,window_df):
     print('u_rho_l: ', rho_L)
 
     rho_tubbing = rho_s
-    # print('rho_tubbing: ', rho_tubbing)
     theta_rad = np.deg2rad(theta)
-    # print('theta_rad: ', theta_rad)
-
-    g = 9.81
+    sin_theta = np.sin(theta_rad)
+    
     uL = 0.5E-3
-    L_ = unc.ufloat(L,uL)
+    L_ = unc.ufloat(L, uL)
     uL2 = 0.5E-3
-    L2_ = unc.ufloat(L2,uL2)
-    # print('L: ', L_)
+    L2_ = unc.ufloat(L2, uL2)
 
-
-    dPg_dz = ((1-Alpha)*rho_L + Alpha*rho_G) * g * np.sin(theta_rad)
+    # Calcular densidade média da mistura uma única vez
+    rho_mistura = (1-Alpha)*rho_L + Alpha*rho_G
+    dPg_dz = rho_mistura * g * sin_theta
     
     # Cálculo da incerteza do friccional para Yokogawa (usando L)
     if dP_yokogawa is not None:
+        termo_gravitacional = (rho_mistura - rho_tubbing) * g * sin_theta
         if direction in ['Upward']:
-            dPf_dz = (dP_yokogawa/L_) - ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
+            dPf_dz = (dP_yokogawa/L_) - termo_gravitacional
             dPt_dz = dPf_dz + dPg_dz
         elif direction in ['Downward','Horizontal']:
             print('Downward')
-            dPf_dz = -(dP_yokogawa/L_) + ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
+            dPf_dz = -(dP_yokogawa/L_) + termo_gravitacional
             dPt_dz = -(abs(dPf_dz)) + dPg_dz
         
         print(f'dPf_dz (Yokogawa): {dPf_dz:.3f}')
@@ -321,7 +303,7 @@ def uncertainties_calc(resumo_df,window_df):
     udPg_dz = dPg_dz.std_dev
 
     # Adicionar a incerteza ao resumo_df logo após a coluna dP_F_dz do sensor Yokogawa
-    if sensor_Yokogawa != None and dP_yokogawa is not None:
+    if sensor_Yokogawa is not None and dP_yokogawa is not None:
         col_name = f'dP_F/dz {sensor_Yokogawa}'
         unc_col_name = f'udP_F_dz_{sensor_Yokogawa}'
         if col_name in resumo_df.columns:
@@ -336,7 +318,9 @@ def uncertainties_calc(resumo_df,window_df):
         else:
             resumo_df[unc_col_name] = udPf_dz_yokogawa
     
-    # Processar sensores Endress (left e right) - usando L2
+    # Processar sensores Endress (top e bottom) - usando L2
+    # Armazenar valores calculados para evitar recálculo
+    endress_results = {}
     for sensor_Endress in [sensor_Endress_top, sensor_Endress_bottom]:
         if sensor_Endress is not None:
             if '-3' in sensor_Endress:
@@ -350,21 +334,31 @@ def uncertainties_calc(resumo_df,window_df):
                 continue
             udP = 0.00055*span_endress
             dP_mean = np.mean(window_df[sensor_Endress])
-            dP_endress = unc.ufloat(dP_mean,udP)
+            dP_endress = unc.ufloat(dP_mean, udP)
             print(sensor_Endress)
             print(f'dP: {dP_endress:.3f}')
             
             # Calcular incertezas para este sensor Endress usando L2
+            # Para Endress, rho_tubbing é rho_liquido, não rho_s
+            rho_tubbing_endress = rho_L
+            termo_gravitacional_endress = (rho_mistura - rho_tubbing_endress) * g * sin_theta
             if direction in ['Upward']:
-                dPf_dz_endress = (dP_endress/L2_) - ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
+                dPf_dz_endress = (dP_endress/L2_) - termo_gravitacional_endress
                 dPt_dz_endress = dPf_dz_endress + dPg_dz
             elif direction in ['Downward','Horizontal']:
-                dPf_dz_endress = -(dP_endress/L2_) + ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
+                dPf_dz_endress = -(dP_endress/L2_) + termo_gravitacional_endress
                 dPt_dz_endress = -(abs(dPf_dz_endress)) + dPg_dz
             
             udPf_dz_endress = dPf_dz_endress.std_dev
             udPt_dz_endress = dPt_dz_endress.std_dev
             
+            # Armazenar resultados para uso posterior
+            endress_results[sensor_Endress] = {
+                'udPf_dz': udPf_dz_endress,
+                'udPt_dz': udPt_dz_endress
+            }
+            
+            # Adicionar incerteza friccional
             col_name = f'dP_F/dz {sensor_Endress}'
             unc_col_name = f'udP_F_dz_{sensor_Endress}'
             if col_name in resumo_df.columns:
@@ -411,7 +405,7 @@ def uncertainties_calc(resumo_df,window_df):
         resumo_df[grav_unc_col_name] = udPg_dz
 
     # Adicionar a incerteza ao resumo_df logo após a coluna dP_dz_total do sensor Yokogawa
-    if sensor_Yokogawa != None and dP_yokogawa is not None:
+    if sensor_Yokogawa is not None and dP_yokogawa is not None:
         total_col_name = f'dP_dz_total_{sensor_Yokogawa}'
         total_unc_col_name = f'udP_dz_total_{sensor_Yokogawa}'
         if total_col_name in resumo_df.columns:
@@ -426,32 +420,10 @@ def uncertainties_calc(resumo_df,window_df):
         else:
             resumo_df[total_unc_col_name] = udPt_dz_yokogawa
             
-    # Processar sensores Endress (left e right) - as incertezas já foram calculadas no loop anterior
+    # Adicionar incertezas totais dos sensores Endress (usando valores já calculados)
     for sensor_Endress in [sensor_Endress_top, sensor_Endress_bottom]:
-        if sensor_Endress is not None:
-            # Recalcular para obter as incertezas (já calculadas acima, mas precisamos acessá-las)
-            if '-3' in sensor_Endress:
-                span_endress = 6E3
-            elif '-10' in sensor_Endress:
-                span_endress = 20E3
-            elif '-40' in sensor_Endress:
-                span_endress = 80E3
-            else:
-                continue
-            udP = 0.00055*span_endress
-            dP_mean = np.mean(window_df[sensor_Endress])
-            dP_endress = unc.ufloat(dP_mean,udP)
-            
-            # Calcular incertezas para este sensor Endress usando L2
-            if direction in ['Upward']:
-                dPf_dz_endress = (dP_endress/L2_) - ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
-                dPt_dz_endress = dPf_dz_endress + dPg_dz
-            elif direction in ['Downward','Horizontal']:
-                dPf_dz_endress = -(dP_endress/L2_) + ((1-Alpha)*rho_L + Alpha*rho_G - rho_tubbing) * g * np.sin(theta_rad)
-                dPt_dz_endress = -(abs(dPf_dz_endress)) + dPg_dz
-            
-            udPt_dz_endress = dPt_dz_endress.std_dev
-            
+        if sensor_Endress is not None and sensor_Endress in endress_results:
+            udPt_dz_endress = endress_results[sensor_Endress]['udPt_dz']
             total_col_name = f'dP_dz_total_{sensor_Endress}'
             total_unc_col_name = f'udP_dz_total_{sensor_Endress}'
             if total_col_name in resumo_df.columns:
@@ -470,8 +442,7 @@ def uncertainties_calc(resumo_df,window_df):
 
 def save_results(df: pd.DataFrame, coluna_escolhida: str, start_idx: int, end_idx: int, min_std: float, media_janela: float, 
                 min_window_size: float, max_window_size: float, best_window_size: float, file_path: str, data_teste: str, 
-                fluid_1: str, fluid_2: str, direction: str, theta: int, ID: str, nomes: list = None, medias: list = None, desvios: list = None, uAs: list = None,
-                escolha_janela: str = None):
+                fluid_1: str, fluid_2: str, direction: str, theta: int, ID: str, escolha_janela: str = None):
     """
     Salva os resultados da análise em um arquivo Excel.
     Agora inclui as estatísticas (média, desvio padrão, uA) de cada variável de interesse.
@@ -583,13 +554,11 @@ def save_results(df: pd.DataFrame, coluna_escolhida: str, start_idx: int, end_id
     try:
         if temperatura_mesa in window_data.columns:
             temp_liquido_celsius = window_data[temperatura_mesa]
-            temp_liquido_k = temp_liquido_celsius + 273.15
-            if fluid_2 == 'Water':
-                rho_liquido_vals = [PropsSI('D', 'T', t, 'P', 101325, 'Water') for t in temp_liquido_k]
-            elif fluid_2 == 'Oil':
-                rho_liquido_vals = -0.65178*temp_liquido_celsius +879.76961 
-
-            rho_liquido_medio = np.mean(rho_liquido_vals)
+            rho_liquido_vals = calc_liquid_density(temp_liquido_celsius, fluid_2)
+            if isinstance(rho_liquido_vals, pd.Series):
+                rho_liquido_medio = rho_liquido_vals.mean()
+            else:
+                rho_liquido_medio = float(rho_liquido_vals)
         else:
             rho_liquido_medio = 1000
     except Exception as e:
@@ -791,27 +760,6 @@ def plot_windows(df, colunas, start_idx, end_idx, best_window_size, output_dir, 
     plt.savefig(output_path)
     plt.close(fig)
 
-def uncert_propagation(df, colunas, start_idx, end_idx, best_window_size):
-    """
-    Propaga as incertezas das variáveis para a variável critério.
-    Para cada coluna de interesse, calcula a média, o desvio padrão e a incerteza estatística tipo A (padrão da média) na janela selecionada.
-    Retorna listas com os resultados para uso posterior.
-    """
-    n = end_idx - start_idx
-    medias = []
-    desvios = []
-    uAs = []
-    for coluna_info in colunas:
-        nome_coluna = coluna_info[0]
-        dados_janela = df[nome_coluna].iloc[start_idx:end_idx]
-        media = dados_janela.mean()
-        desvio = dados_janela.std(ddof=1)
-        uA = desvio / (n ** 0.5)
-        medias.append(media)
-        desvios.append(desvio)
-        uAs.append(uA)
-    return [c[0] for c in colunas], medias, desvios, uAs
-
 def calc_alpha(df, start_idx, end_idx):
     """
     Determina a fração de vazio (alpha) na mistura a partir dos dados do densitômetro na janela selecionada.
@@ -838,74 +786,65 @@ def calc_frictional_pressure_gradient(df, colunas, start_idx, end_idx, best_wind
     indices_pdt = [i for i, col in enumerate(colunas) if col[0].startswith("PDT")]
 
     try:
-        if fluid_1 or fluid_2 == 'Air':
-            pressao_gas_bar = df[pressao_mesa].iloc[start_idx:end_idx]
-            temp_gas_celsius = df[temperatura_mesa].iloc[start_idx:end_idx]
-            
-            pressao_gas_parede_bar = df[pressao_parede].iloc[start_idx:end_idx]
-            temp_gas_parede_celsius = df[temperatura_parede].iloc[start_idx:end_idx]
-        elif fluid_1 or fluid_2 == 'SF6':
-            print('SF6 not implemented yet')
-            exit()
+        # Verificar fluido
+        pressao_gas_bar = df[pressao_mesa].iloc[start_idx:end_idx]
+        temp_gas_celsius = df[temperatura_mesa].iloc[start_idx:end_idx]
+        
        
         pressao_gas_pa = (pressao_gas_bar + 1) * 1e5
         temp_gas_k = temp_gas_celsius + 273.15
         
-        pressao_gas_parede_pa = (pressao_gas_parede_bar + 1) * 1e5
-        temp_gas_parede_k = temp_gas_parede_celsius + 273.15
-        
         rho_gas = [PropsSI('D', 'P', p, 'T', t, fluid_1) for p, t in zip(pressao_gas_pa, temp_gas_k)]
-        rho_gas_parede = [PropsSI('D', 'P', p, 'T', t, fluid_1) for p, t in zip(pressao_gas_parede_pa, temp_gas_parede_k)]
         rho_gas = pd.Series(rho_gas, index=pressao_gas_pa.index)
-        rho_gas_parede = pd.Series(rho_gas_parede, index=pressao_gas_parede_pa.index)
     
         try:
-            if fluid_2 == 'Water':
-                temp_liquido_celsius = df[temperatura_mesa].iloc[start_idx:end_idx]
-                temp_liquido_k = temp_liquido_celsius + 273.15
-                rho_liquido = [PropsSI('D', 'T', t, 'P', 101325, 'Water') for t in temp_liquido_k]
-                rho_liquido = pd.Series(rho_liquido, index=temp_liquido_celsius.index)
-            elif fluid_2 == 'Oil':
-                temp_liquido_celsius = df[temperatura_mesa].iloc[start_idx:end_idx]
-                rho_liquido = -0.65178*temp_liquido_celsius +879.76961 
+            temp_liquido_celsius = df[temperatura_mesa].iloc[start_idx:end_idx]
+            rho_liquido = calc_liquid_density(temp_liquido_celsius, fluid_2)
+            if not isinstance(rho_liquido, pd.Series):
+                rho_liquido = pd.Series([rho_liquido] * len(temp_liquido_celsius), index=temp_liquido_celsius.index)
         except Exception as e:
-            rho_liquido = 1000
+            rho_liquido = pd.Series([1000] * len(df[temperatura_mesa].iloc[start_idx:end_idx]), 
+                                   index=df[temperatura_mesa].iloc[start_idx:end_idx].index)
 
     except KeyError as e:
         rho_gas = None
 
+    # Calcular valores comuns uma única vez
+    theta_rad = np.deg2rad(theta)
+    sin_theta = np.sin(theta_rad)
+    
+    # Calcular densidade média da mistura uma única vez
+    rho_mistura_series = (1-alpha_series)*rho_liquido + alpha_series*rho_gas
+    dP_dz_gravitacional = rho_mistura_series * g * sin_theta
+    dP_dz_gravitacional_mean = np.mean(dP_dz_gravitacional)
+    
     dP_F_df = pd.DataFrame()
 
     for i in indices_pdt:
         coluna_pdt_nome = colunas[i][0]
-        theta_rad = np.deg2rad(theta)
-
+        
+        # Determinar rho_tubbing e comprimento baseado no sensor
         if coluna_pdt_nome == sensor_Yokogawa:
             rho_tubbing = rho_s
-        else:
-            rho_tubbing = rho_liquido
-        
-        delta_p_prime = df[coluna_pdt_nome].iloc[start_idx:end_idx]
-        
-        # Determinar qual comprimento usar (L para Yokogawa, L2 para Endress)
-        if coluna_pdt_nome == sensor_Yokogawa:
             comprimento = L
         elif coluna_pdt_nome in [sensor_Endress_top, sensor_Endress_bottom]:
+            rho_tubbing = rho_liquido
             comprimento = L2
         else:
+            rho_tubbing = rho_liquido
             comprimento = L  # Padrão para outros sensores PDT
         
-        termo_gravitacional = ((1-alpha_series)*rho_liquido + alpha_series*rho_gas - rho_tubbing) * g * np.sin(theta_rad)
-        dP_dz_gravitacional = ((1-alpha_series)*rho_liquido + alpha_series*rho_gas) * g * np.sin(theta_rad)
+        delta_p_prime = df[coluna_pdt_nome].iloc[start_idx:end_idx]
+        termo_gravitacional = (rho_mistura_series - rho_tubbing) * g * sin_theta
 
         if direction in ['Upward']:
             dP_F_over_dz_series = (delta_p_prime / comprimento) - termo_gravitacional
             dP_F_over_dz_RMS = np.sqrt(np.mean(np.square(dP_F_over_dz_series)))
-            dP_dz_total = dP_F_over_dz_RMS + np.mean(dP_dz_gravitacional)
+            dP_dz_total = dP_F_over_dz_RMS + dP_dz_gravitacional_mean
         elif direction in ['Downward','Horizontal']:
             dP_F_over_dz_series = -(delta_p_prime / comprimento) + termo_gravitacional 
             dP_F_over_dz_RMS = np.sqrt(np.mean(np.square(dP_F_over_dz_series)))
-            dP_dz_total = -(dP_F_over_dz_RMS) + np.mean(dP_dz_gravitacional)
+            dP_dz_total = -(dP_F_over_dz_RMS) + dP_dz_gravitacional_mean
 
         dP_F_df[coluna_pdt_nome] = dP_F_over_dz_series
         dP_F_df[f'dP_dz_total_{coluna_pdt_nome}'] = dP_dz_total
@@ -1236,25 +1175,6 @@ if __name__ == "__main__":
         print(f"Desvio padrão: {min_std:.4f}")
         print(f"Tamanho da janela: {best_window_size:.1f} segundos")
 
-    print("\nCalculando e exibindo a incerteza tipo A para cada variável na janela...")
-    nomes, medias, desvios, uAs = uncert_propagation(df, colunas_analise_filtradas, start_idx, end_idx, best_window_size)
-    
-    plt.figure(figsize=(15, 8))
-    
-    plt.plot(df['X_Value'], df[coluna_escolhida], 'b-', label='Full Series', alpha=0.7)
-    
-    plt.axvspan(df['X_Value'].iloc[start_idx], df['X_Value'].iloc[end_idx-1], alpha=0.3, color='red', label=f'Window = {best_window_size:.0f} s')
-    
-    plt.axhline(y=media_janela, color='g', linestyle='--', label=f'Mean: {media_janela:.4f}')
-    
-    apelido_escolhido = coluna_escolhida
-    unidade_escolhida = ''
-    for col in colunas_analise_filtradas:
-        if isinstance(col, (list, tuple)) and col[0] == coluna_escolhida:
-            apelido_escolhido = col[1]
-            unidade_escolhida = col[2]
-            break
-    
     plot_windows(df, colunas_analise_filtradas, start_idx, end_idx, best_window_size, output_dir, base_name)
     
     alpha_df = plot_alpha(df, start_idx, end_idx, output_dir, base_name)
@@ -1264,9 +1184,7 @@ if __name__ == "__main__":
     
     save_results(df, coluna_escolhida, start_idx, end_idx, min_std, media_janela,
                 min_window_size, max_window_size, best_window_size, file_path, data_teste,
-                fluid_1, fluid_2, direction, theta, ID,
-                nomes=colunas_analise_filtradas, medias=medias, desvios=desvios, uAs=uAs,
-                escolha_janela=escolha_janela)
+                fluid_1, fluid_2, direction, theta, ID, escolha_janela=escolha_janela)
     
     plot_pressure_gradients(df, dP_F_df, start_idx, end_idx, output_dir, base_name, sensor_Yokogawa, sensor_Endress_top, sensor_Endress_bottom, direction)
     print("Arquivo excel dos dados tratados criado...")
