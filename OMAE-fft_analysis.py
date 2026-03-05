@@ -12,7 +12,7 @@ from scipy import signal
 ####################################################################################################################################################
 #                                            INPUTS
 ####################################################################################################################################################
-file_path = "G:/Meu Drive/LEMI/uncertainties/data_example/example/freq_slug/AOU05P03/AOU05P03_acc.tdms"
+file_path = "H:/Meu Drive/LEMI/uncertainties/data_example/example/freq_slug/AOU05P03/AOU05P03_acc.tdms"
 freq_corte = 45.0  # Frequência de corte do filtro passa-baixa em Hz - MODIFIQUE ESTE VALOR CONFORME NECESSÁRIO
 
 ### Colunas de interesse -> Insira o nome das colunas a plotar e avaliar do arquivo TDMS
@@ -341,6 +341,7 @@ def apply_fft(df: pd.DataFrame, coluna: str, output_dir: str, base_name: str, fr
     y_filtered = apply_lowpass_filter(y_data, fs, freq_corte)
 
     n = len(y_data)
+    print(f"Número de amostras: {n}")
     fft_result_original = np.fft.fft(y_data)
     freqs = np.fft.fftfreq(n, dt)
     magnitude_original = np.abs(fft_result_original)

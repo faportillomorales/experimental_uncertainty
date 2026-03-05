@@ -3,7 +3,7 @@ from typing import Tuple, Optional
 
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
-from matplotlib.ticker import MaxNLocator, MultipleLocator
+from matplotlib.ticker import MaxNLocator, MultipleLocator, ScalarFormatter
 import numpy as np
 import pandas as pd
 from scipy import signal
@@ -193,6 +193,10 @@ def process_tdms_data(
     
     magnitude_orig = np.abs(fft_orig)
     magnitude_filt = np.abs(fft_filt)
+    # Normalização para espectro unilateral (amplitude em unidades do sinal)
+    norm = 2.0 / n
+    magnitude_orig = magnitude_orig * norm
+    magnitude_filt = magnitude_filt * norm
     
     # Filtra apenas frequências positivas
     positive_freq_mask = freqs > 0
@@ -267,6 +271,10 @@ def process_monitor_data(
     
     magnitude_orig = np.abs(fft_orig)
     magnitude_filt = np.abs(fft_filt)
+    # Normalização para espectro unilateral (amplitude em unidades do sinal)
+    norm = 2.0 / n
+    magnitude_orig = magnitude_orig * norm
+    magnitude_filt = magnitude_filt * norm
     
     # Filtra apenas frequências positivas
     positive_freq_mask = freqs > 0
@@ -337,10 +345,12 @@ def plot_combined_fft(
             Line2D([], [], marker="o", color="blue", linestyle="None", markersize=8, 
                    markeredgecolor="darkblue", markeredgewidth=1.5, label=f"Peak: {peak_freq_tdms:.2f} Hz")
         )
-    _base_axes_style(axes[0], xlabel="Frequency (Hz)", ylabel="Magnitude", hide_ticks=False)
+    _base_axes_style(axes[0], xlabel="Frequency (Hz)", ylabel=r"∣A(f)∣ [m/s²]", hide_ticks=False)
     axes[0].set_xlim(freq_min_plot, freq_max_plot)
     axes[0].xaxis.set_major_locator(MultipleLocator(10))
-    axes[0].set_yticks([])  # Remove valores do eixo Y
+    yfmt0 = ScalarFormatter(useOffset=True, useMathText=True)
+    yfmt0.set_powerlimits((0, 0))
+    axes[0].yaxis.set_major_formatter(yfmt0)
     axes[0].grid(True, alpha=0.3, linestyle="--")
     if len(legend_handles_tdms) > 0:
         axes[0].legend(handles=legend_handles_tdms, frameon=True, fontsize=LEGEND_FONT_SIZE - 2)
@@ -363,10 +373,12 @@ def plot_combined_fft(
             Line2D([], [], marker="o", color="blue", linestyle="None", markersize=8, 
                    markeredgecolor="darkblue", markeredgewidth=1.5, label=f"Peak: {peak_freq_monitor:.2f} Hz")
         )
-    _base_axes_style(axes[1], xlabel="Frequency (Hz)", ylabel="Magnitude", hide_ticks=False)
+    _base_axes_style(axes[1], xlabel="Frequency (Hz)", ylabel=r"∣X(f)∣ [m]", hide_ticks=False)
     axes[1].set_xlim(freq_min_plot, freq_max_plot)
     axes[1].xaxis.set_major_locator(MultipleLocator(10))
-    axes[1].set_yticks([])  # Remove valores do eixo Y
+    yfmt1 = ScalarFormatter(useOffset=True, useMathText=True)
+    yfmt1.set_powerlimits((0, 0))
+    axes[1].yaxis.set_major_formatter(yfmt1)
     axes[1].grid(True, alpha=0.3, linestyle="--")
     if len(legend_handles_monitor) > 0:
         axes[1].legend(handles=legend_handles_monitor, frameon=True, fontsize=LEGEND_FONT_SIZE - 2)
