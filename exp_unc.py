@@ -10,8 +10,9 @@ import sys
 ####################################################################################################################################################
 #                                            INPUTS
 ####################################################################################################################################################
-file_path = 'C:/Users/pos Oscar/Desktop/FSC2/4_SF6-Oil_Testes/SOU05/SOU05P05/SOU05P05' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
+file_path = 'data_example/example/SF6/SOH00P01/SOH00P01' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
 
+Di = 0.05251     # m diâmetro interno da tubulação (para número de Reynolds)
 L = 1.70         # m comprimento entre as tomadas de diferencial de pressão
 L2 = 2.5         # m comprimento entre as tomadas de diferencial de pressão LEFT AND RIGHT ENDRESS
 # Valores de calibração do densitômetro IMPORTANTE
@@ -72,9 +73,31 @@ def calc_liquid_density(temp_celsius, fluid_2):
             temp_k = temp_celsius + 273.15
             return PropsSI('D', 'T', temp_k, 'P', 101325, 'Water')
     elif fluid_2 == 'Oil':
-        return -0.65178 * temp_celsius + 879.76961
+        # return -0.65178 * temp_celsius + 879.76961:
+        # return 0.031267*temp_celsius**2 - 3.2050*temp_celsius + 97.6594 #Viscosity model
+        return 0.0008*temp_celsius**2 - 0.698*temp_celsius + 879.154
     else:
         return 1000  # Valor padrão
+
+
+def calc_liquid_viscosity(temp_celsius, fluid_2):
+    """
+    Calcula a viscosidade dinâmica do líquido (Pa·s).
+    Water: CoolProp. Oil: correlação em temperatura (°C).
+    """
+    if fluid_2 == 'Water':
+        if isinstance(temp_celsius, pd.Series):
+            temp_k = temp_celsius + 273.15
+            return pd.Series([PropsSI('V', 'T', t, 'P', 101325, 'Water') for t in temp_k], index=temp_celsius.index)
+        temp_k = temp_celsius + 273.15
+        return PropsSI('V', 'T', temp_k, 'P', 101325, 'Water')
+    elif fluid_2 == 'Oil':
+        # Equação em cP; converter para Pa·s (1 cP = 1e-3 Pa·s)
+        mu_cp = 0.031267 * (temp_celsius**2) - 3.2050 * temp_celsius + 97.6594
+        return mu_cp * 1e-3
+    else:
+        return 1e-3  # Valor padrão (água aproximada) em Pa·s
+
 
 def find_min_std_window(df: pd.DataFrame, column_name: str, min_window_size: float, max_window_size: float):
     """
@@ -262,12 +285,12 @@ def uncertainties_calc(resumo_df,window_df):
     u_rho_g = rho_G.std_dev
     print('u_rho_g: ', rho_G)
 
-    # Cálcuo da incerteza da densidade do líquido
+    # Cálcuo da incerteza da densidade do líquido (mesma equação que calc_liquid_density)
     if fluid_2 == 'Water':
         rho_L = - 0.0042*(T**2) - 0.0529*T + 1000.9		# Média da densidade do líquido
         print('rho_agua')
     elif fluid_2 == 'Oil':
-        rho_L = -0.65178*T + 879.76961
+        rho_L = 0.0008*(T**2) - 0.698*T + 879.154
         print('rho_óleo')
     u_rho_l = rho_L.std_dev
     print('u_rho_l: ', rho_L)
@@ -445,6 +468,35 @@ def uncertainties_calc(resumo_df,window_df):
 
     return resumo_df
 
+
+def _gradient_column_name_for_excel(old_name: str) -> str:
+    """
+    Converte o nome da coluna de gradiente de pressão para a nomenclatura usada na planilha _processed.
+    Friccional (F), gravitacional (G), total (T). Unidades (Pa) -> (Pa/m).
+    """
+    if old_name.startswith('dP_F/dz ') and 'dP_dz_total_' not in old_name and 'dP_dz_gravitacional' not in old_name:
+        sensor = old_name[len('dP_F/dz '):]
+        sensor_units = sensor.replace('(Pa)', '(Pa/m)') if '(Pa)' in sensor else sensor + '(Pa/m)'
+        return f'-dpdz_F_{sensor_units}'
+    if old_name.startswith('udP_F_dz_'):
+        sensor = old_name[len('udP_F_dz_'):]
+        sensor_units = sensor.replace('(Pa)', '(Pa/m)') if '(Pa)' in sensor else sensor + '(Pa/m)'
+        return f'U(-dpdz_F_{sensor_units})'
+    if old_name == 'dP_dz_gravitacional':
+        return '-dpdz_G_(Pa/m)'
+    if old_name == 'udP_dz_gravitacional':
+        return 'U(-dpdz_G_(Pa/m))'
+    if old_name.startswith('dP_dz_total_'):
+        sensor = old_name[len('dP_dz_total_'):]
+        sensor_units = sensor.replace('(Pa)', '(Pa/m)') if '(Pa)' in sensor else sensor + '(Pa/m)'
+        return f'-dpdz_T_{sensor_units}'
+    if old_name.startswith('udP_dz_total_'):
+        sensor = old_name[len('udP_dz_total_'):]
+        sensor_units = sensor.replace('(Pa)', '(Pa/m)') if '(Pa)' in sensor else sensor + '(Pa/m)'
+        return f'U(-dpdz_T_{sensor_units})'
+    return old_name
+
+
 def save_results(df: pd.DataFrame, coluna_escolhida: str, start_idx: int, end_idx: int, min_std: float, media_janela: float, 
                 min_window_size: float, max_window_size: float, best_window_size: float, file_path: str, data_teste: str, 
                 fluid_1: str, fluid_2: str, direction: str, theta: int, ID: str, escolha_janela: str = None):
@@ -569,18 +621,59 @@ def save_results(df: pd.DataFrame, coluna_escolhida: str, start_idx: int, end_id
     except Exception as e:
         rho_liquido_medio = 1000
 
-    # Inserir rho_liquido logo após rho_g
+    # Médias de viscosidade e Reynolds na janela (para planilha)
+    mu_g_medio = window_data['mu_g'].mean() if 'mu_g' in window_data.columns else np.nan
+    mu_liquido_medio = window_data['mu_liquido'].mean() if 'mu_liquido' in window_data.columns else np.nan
+    Re_sg_medio = window_data['Re_sg'].mean() if 'Re_sg' in window_data.columns else np.nan
+    Re_sl_medio = window_data['Re_sl'].mean() if 'Re_sl' in window_data.columns else np.nan
+    J_gas_col = get_J_column_for_fluid(window_data, fluid_1)
+    J_liquido_col = get_J_column_for_fluid(window_data, fluid_2)
+    J_gas_medio = medias_janela.get(J_gas_col, np.nan) if J_gas_col else np.nan
+    J_liquido_medio = medias_janela.get(J_liquido_col, np.nan) if J_liquido_col else np.nan
+
+    # Inserir na ordem: rho_g, mu_g, rho_liquido, mu_liquido, J_gas, J_liquido, Re_sg, Re_sl
+    cols_remover = {'mu_g', 'rho_liquido', 'mu_liquido', 'Re_sg', 'Re_sl'}
+    if J_gas_col:
+        cols_remover.add(J_gas_col)
+    if J_liquido_col:
+        cols_remover.add(J_liquido_col)
     if 'rho_g' in resumo_dict:
-        items = list(resumo_dict.items())
-        idx = [i for i, (k, v) in enumerate(items) if k == 'rho_g']
-        if idx:
-            insert_pos = idx[0] + 1
-            items.insert(insert_pos, ('rho_liquido', rho_liquido_medio))
+        items = [(k, v) for k, v in resumo_dict.items() if k not in cols_remover]
+        idx = next((i for i, (k, v) in enumerate(items) if k == 'rho_g'), None)
+        if idx is not None:
+            items.insert(idx + 1, ('mu_g', mu_g_medio))
+            items.insert(idx + 2, ('rho_liquido', rho_liquido_medio))
+            items.insert(idx + 3, ('mu_liquido', mu_liquido_medio))
+            pos = idx + 4
+            if J_gas_col:
+                items.insert(pos, (J_gas_col, J_gas_medio))
+                pos += 1
+            if J_liquido_col:
+                items.insert(pos, (J_liquido_col, J_liquido_medio))
+                pos += 1
+            items.insert(pos, ('Re_sg', Re_sg_medio))
+            items.insert(pos + 1, ('Re_sl', Re_sl_medio))
             resumo_dict = dict(items)
         else:
             resumo_dict['rho_liquido'] = rho_liquido_medio
+            resumo_dict['mu_g'] = mu_g_medio
+            resumo_dict['mu_liquido'] = mu_liquido_medio
+            if J_gas_col:
+                resumo_dict[J_gas_col] = J_gas_medio
+            if J_liquido_col:
+                resumo_dict[J_liquido_col] = J_liquido_medio
+            resumo_dict['Re_sg'] = Re_sg_medio
+            resumo_dict['Re_sl'] = Re_sl_medio
     else:
         resumo_dict['rho_liquido'] = rho_liquido_medio
+        resumo_dict['mu_g'] = mu_g_medio
+        resumo_dict['mu_liquido'] = mu_liquido_medio
+        if J_gas_col:
+            resumo_dict[J_gas_col] = J_gas_medio
+        if J_liquido_col:
+            resumo_dict[J_liquido_col] = J_liquido_medio
+        resumo_dict['Re_sg'] = Re_sg_medio
+        resumo_dict['Re_sl'] = Re_sl_medio
 
     resumo_df = pd.DataFrame([resumo_dict])
     
@@ -598,14 +691,61 @@ def save_results(df: pd.DataFrame, coluna_escolhida: str, start_idx: int, end_id
             window_df[col] = window_data[col]
     
     window_df.insert(0, 'Time (s)', window_data['X_Value'])
+    # Ordem: rho_g, mu_g, rho_liquido, mu_liquido, J_gas, J_liquido, Re_sg, Re_sl
+    cols = list(window_df.columns)
+    for (a, b) in [('rho_g', 'mu_g'), ('mu_g', 'rho_liquido'), ('rho_liquido', 'mu_liquido')]:
+        if a in cols and b in cols and cols.index(b) != cols.index(a) + 1:
+            cols.remove(b)
+            cols.insert(cols.index(a) + 1, b)
+    # Bloco J_gas, J_liquido, Re_sg, Re_sl logo após mu_liquido
+    block = [c for c in [J_gas_col, J_liquido_col, 'Re_sg', 'Re_sl'] if c and c in cols]
+    for c in block:
+        cols.remove(c)
+    if block and 'mu_liquido' in cols:
+        pos = cols.index('mu_liquido') + 1
+        for i, c in enumerate(block):
+            cols.insert(pos + i, c)
+    window_df = window_df[cols]
     
     # Atualizar resumo_df com as incertezas e salvar no Excel
     resumo_df = uncertainties_calc(resumo_df, window_df)
 
-    with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
-        header_df.to_excel(writer, sheet_name='Info', index=False)
-        resumo_df.to_excel(writer, sheet_name='Resumo Medias', index=False, header=True)
-        window_df.to_excel(writer, sheet_name='Serie Temporal', index=False)
+    # Aplicar nova nomenclatura de gradiente (F/G/T e Pa/m) nas colunas da planilha _processed
+    resumo_df = resumo_df.rename(columns={c: _gradient_column_name_for_excel(c) for c in resumo_df.columns})
+    window_df = window_df.rename(columns={c: _gradient_column_name_for_excel(c) for c in window_df.columns})
+
+    # Unidades no nome das colunas rho, mu e Re na planilha _processed
+    _col_units = {
+        'rho_g': 'rho_g(kg/m³)',
+        'rho_liquido': 'rho_liquido(kg/m³)',
+        'mu_g': 'mu_g(Pa.s)',
+        'mu_liquido': 'mu_liquido(Pa.s)',
+        'Re_sg': 'Re_sg(-)',
+        'Re_sl': 'Re_sl(-)',
+    }
+    resumo_df = resumo_df.rename(columns={c: _col_units.get(c, c) for c in resumo_df.columns})
+    window_df = window_df.rename(columns={c: _col_units.get(c, c) for c in window_df.columns})
+
+    def _write_excel(path):
+        with pd.ExcelWriter(path, engine='openpyxl') as writer:
+            header_df.to_excel(writer, sheet_name='Info', index=False)
+            resumo_df.to_excel(writer, sheet_name='Resumo Medias', index=False, header=True)
+            window_df.to_excel(writer, sheet_name='Serie Temporal', index=False)
+
+    try:
+        _write_excel(output_file)
+    except PermissionError:
+        # Arquivo pode estar aberto no Excel; gravar em temporário e tentar substituir
+        tmp_file = output_file + '.tmp'
+        _write_excel(tmp_file)
+        try:
+            os.replace(tmp_file, output_file)
+        except OSError:
+            # Destino ainda bloqueado; salvar com nome alternativo
+            alt_file = os.path.join(diretorio, f"{base_name}_processed_NEW.xlsx")
+            os.replace(tmp_file, alt_file)
+            print(f"\nAtenção: não foi possível gravar em '{output_file}' (arquivo pode estar aberto).")
+            print(f"Resultado salvo em: {alt_file}")
     
 
 def plot_time_series(df, colunas, output_dir, base_name):
@@ -901,6 +1041,24 @@ def extract_info_from_filename(filename: str):
     
     return fluid_1, fluid_2, direction, theta, ID, is_validation
 
+
+def get_J_column_for_fluid(df: pd.DataFrame, fluid: str) -> str:
+    """
+    Retorna o nome da coluna de velocidade superficial J para o fluido,
+    a partir da identificação do fluido (ex.: 'SF6', 'Oil', 'Air', 'Water').
+    Procura primeiro 'J_<fluid>(m/s)'; se não existir, procura coluna que comece com 'J_' e contenha o nome do fluido.
+    """
+    if not fluid or fluid == 'Unknown':
+        return None
+    exact = f'J_{fluid}(m/s)'
+    if exact in df.columns:
+        return exact
+    for c in df.columns:
+        if isinstance(c, str) and c.startswith('J_') and fluid in c and '(m/s)' in c:
+            return c
+    return None
+
+
 def check_required_columns(df: pd.DataFrame, colunas_analise: list):
     """
     Verifica se as colunas necessárias existem no DataFrame.
@@ -908,7 +1066,7 @@ def check_required_columns(df: pd.DataFrame, colunas_analise: list):
     """
     colunas_faltantes = []
     
-    colunas_calculadas = ['Alpha', 'rho_g', 'rho_g_parede']
+    colunas_calculadas = ['Alpha', 'rho_g', 'rho_g_parede', 'mu_g', 'mu_liquido', 'rho_liquido', 'Re_sg', 'Re_sl']
     
     for coluna_info in colunas_analise:
         nome_coluna = coluna_info[0]
@@ -1061,6 +1219,14 @@ if __name__ == "__main__":
     print(f"ID do ponto: {ID}")
     print(f"Ponto de validação: {'Sim' if is_validation else 'Não'}")
 
+    # Colunas J (velocidade superficial) identificadas automaticamente a partir dos fluidos
+    J_gas_col = get_J_column_for_fluid(df, fluid_1)
+    J_liquido_col = get_J_column_for_fluid(df, fluid_2)
+    if J_gas_col:
+        print(f"Coluna J gás: {J_gas_col}")
+    if J_liquido_col:
+        print(f"Coluna J líquido: {J_liquido_col}")
+
     output_dir = os.path.dirname(file_path)
     base_name = os.path.splitext(os.path.basename(file_path))[0]
 
@@ -1076,12 +1242,35 @@ if __name__ == "__main__":
             temp_gas_k_full = temp_gas_celsius_full + 273.15
             rho_g_full = [PropsSI('D', 'P', p, 'T', t, fluid_1) for p, t in zip(pressao_gas_pa_full, temp_gas_k_full)]
             df['rho_g'] = rho_g_full
+            # Viscosidade dinâmica do gás (CoolProp para Air, SF6) em Pa·s
+            if fluid_1 in ['Air', 'SF6', 'Water']:
+                mu_g_full = [PropsSI('V', 'P', p, 'T', t, fluid_1) for p, t in zip(pressao_gas_pa_full, temp_gas_k_full)]
+                df['mu_g'] = mu_g_full
         except Exception as e:
             # Garantir que os dados são numéricos
+            pressao_gas_pa_full = (df[pressao_mesa] + 1) * 1e5
+            temp_gas_k_full = df[temperatura_mesa] + 273.15
             pressao_gas_pa_full_numeric = pd.to_numeric(pressao_gas_pa_full, errors='coerce')
             temp_gas_k_full_numeric = pd.to_numeric(temp_gas_k_full, errors='coerce')
             df['rho_g'] = (pressao_gas_pa_full_numeric) / (8.314 * temp_gas_k_full_numeric)
-    
+            if fluid_1 in ['Air', 'SF6', 'Water']:
+                try:
+                    df['mu_g'] = [PropsSI('V', 'P', p, 'T', t, fluid_1) for p, t in zip(pressao_gas_pa_full, temp_gas_k_full)]
+                except Exception:
+                    pass
+    # Densidade e viscosidade do líquido (CoolProp para Water, equações para Oil) e número de Reynolds
+    if temperatura_mesa in df.columns and fluid_2 in ['Water', 'Oil']:
+        df['rho_liquido'] = calc_liquid_density(df[temperatura_mesa], fluid_2)
+        df['mu_liquido'] = calc_liquid_viscosity(df[temperatura_mesa], fluid_2)
+
+    # Número de Reynolds superficial: Re_s = rho * J * Di / mu (por fase)
+    if 'rho_g' in df.columns and 'mu_g' in df.columns and J_gas_col:
+        mu_g_safe = df['mu_g'].replace(0, np.nan)
+        df['Re_sg'] = (df['rho_g'] * df[J_gas_col] * Di / mu_g_safe).fillna(np.nan)
+    if 'rho_liquido' in df.columns and 'mu_liquido' in df.columns and J_liquido_col:
+        mu_l_safe = df['mu_liquido'].replace(0, np.nan)
+        df['Re_sl'] = (df['rho_liquido'] * df[J_liquido_col] * Di / mu_l_safe).fillna(np.nan)
+
     if any(col[0] == 'rho_g_parede' for col in colunas_analise):
         try:
             pressao_gas_parede_bar_full = df[pressao_parede]
