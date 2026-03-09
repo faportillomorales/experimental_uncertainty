@@ -989,7 +989,7 @@ def calc_frictional_pressure_gradient(df, colunas, start_idx, end_idx, best_wind
         elif direction in ['Downward','Horizontal']:
             dP_F_over_dz_series = -(delta_p_prime / comprimento) + termo_gravitacional 
             dP_F_over_dz_RMS = np.sqrt(np.mean(np.square(dP_F_over_dz_series)))
-            dP_dz_total = -(dP_F_over_dz_RMS) + dP_dz_gravitacional_mean
+            dP_dz_total = dP_F_over_dz_RMS - dP_dz_gravitacional_mean
 
         dP_F_df[coluna_pdt_nome] = dP_F_over_dz_series
         dP_F_df[f'dP_dz_total_{coluna_pdt_nome}'] = dP_dz_total
