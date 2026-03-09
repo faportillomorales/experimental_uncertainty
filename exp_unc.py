@@ -1135,50 +1135,65 @@ def plot_pressure_gradients(df: pd.DataFrame, dP_F_df: pd.DataFrame, start_idx: 
     """
     if dP_F_df is not None and not dP_F_df.empty:
         plt.figure(figsize=(15, 8))
-        
+
+        # Série gravitacional
         grav_series = dP_F_df['dP_dz_gravitacional']
         grav_mean = grav_series.mean()
         grav_std = grav_series.std()
-        plt.plot(df['X_Value'].iloc[start_idx:end_idx], grav_series, 
-                label=f'dP/dz gravitacional\nmean: {grav_mean:.2f} ± {grav_std:.2f}', 
-                color='black', linestyle='--')
-        
+        plt.plot(
+            df['X_Value'].iloc[start_idx:end_idx],
+            grav_series,
+            label=f'dP/dz gravitacional\nmean: {grav_mean:.2f} ± {grav_std:.2f}',
+            color='black',
+            linestyle='--',
+        )
+
+        # Guardar a cor usada para cada sensor (friccional) para reutilizar na série total
+        sensor_colors = {}
+
+        # Séries friccionais dP_F/dz
         for col in dP_F_df.columns:
             if not col.startswith('dP_dz_total') and col != 'dP_dz_gravitacional':
-                if col == sensor_Yokogawa_mid:
-                    sensor_range = col.split('-')[3]
-                    label_base = f'Yokogawa {sensor_range}'
-                elif col in [sensor_Endress_top, sensor_Endress_bottom, sensor_Endress_mid]:
-                    sensor_range = col.split('-')[3]
-                    label_base = f'Endress {sensor_range}'
-                else:
-                    label_base = col
-                
                 series = dP_F_df[col]
                 rms = np.sqrt(np.mean(np.square(series)))
-                plt.plot(df['X_Value'].iloc[start_idx:end_idx], series, 
-                        label=f'dP_F/dz {label_base}\nRMS: {rms:.2f}', 
-                        alpha=0.7)
 
+                # Nome da série no formato usado no Excel
+                label_excel = _gradient_column_name_for_excel(f'dP_F/dz {col}')
+
+                line, = plt.plot(
+                    df['X_Value'].iloc[start_idx:end_idx],
+                    series,
+                    label=f'{label_excel}\nRMS: {rms:.2f}',
+                    alpha=0.7,
+                )
+                sensor_colors[col] = line.get_color()
+
+        # Séries totais dP/dz_total com a mesma cor do friccional correspondente (apenas tracejado muda)
         for col in dP_F_df.columns:
             if col.startswith('dP_dz_total'):
                 sensor_name = col.replace('dP_dz_total_', '')
-                if sensor_name == sensor_Yokogawa_mid:
-                    sensor_range = sensor_name.split('-')[3]
-                    label_base = f'Yokogawa {sensor_range}'
-                elif sensor_name in [sensor_Endress_top, sensor_Endress_bottom, sensor_Endress_mid]:
-                    sensor_range = sensor_name.split('-')[3]
-                    label_base = f'Endress {sensor_range}'
-                else:
-                    label_base = sensor_name
-                
+
                 dP_dz_total = dP_F_df[col].iloc[0]
                 series = pd.Series([dP_dz_total] * len(dP_F_df), index=dP_F_df.index)
-                
-                plt.plot(df['X_Value'].iloc[start_idx:end_idx], series, 
-                        label=f'dP/dz total {label_base}\nValue: {dP_dz_total:.2f}', 
-                        linestyle=':', linewidth=2)
-        
+
+                color = sensor_colors.get(sensor_name)
+
+                label_excel = _gradient_column_name_for_excel(col)
+
+                plot_kwargs = {
+                    'linestyle': ':',
+                    'linewidth': 2,
+                    'label': f'{label_excel}\nValue: {dP_dz_total:.2f}',
+                }
+                if color is not None:
+                    plot_kwargs['color'] = color
+
+                plt.plot(
+                    df['X_Value'].iloc[start_idx:end_idx],
+                    series,
+                    **plot_kwargs,
+                )
+
         plt.xlabel('Time (s)', fontsize=12)
         plt.ylabel(r'$ \frac{\Delta P}{L}$ [Pa/m]', fontsize=12)
         plt.title(r'Pressure Gradients', fontsize=14)
