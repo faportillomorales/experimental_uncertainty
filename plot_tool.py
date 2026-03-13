@@ -7,15 +7,53 @@ import os
 import sys
 from pathlib import Path
 import warnings
+from contextlib import redirect_stderr
 
 # Suprimir avisos específicos do pandas
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 warnings.filterwarnings('ignore', category=UserWarning, module='pandas')
+# Suprimir avisos de timestamp ao salvar PDF/PNG (backend matplotlib/pdf)
+warnings.filterwarnings('ignore', message=r".*timestamp seems very low.*")
+warnings.filterwarnings('ignore', message=r".*regarding as unix timestamp.*")
 
 ####################################################################################################################################################
 #                                            INPUTS
 ####################################################################################################################################################
-file_path = 'data_example/example/mean_v3/Mean_Experimental_Data_FSC2_v3.xlsx' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
+file_path = 'data_example/example/NAS/Experimental_Results_v25_NAS_19_feb_2026_revA.xlsm'  # Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
+
+# Flag para indicar leitura de arquivo NAS processado (_processed_all_sheets.xlsx)
+NAS_file = True
+
+# Abas válidas para arquivos NAS (as demais serão ignoradas)
+ALLOWED_SHEETS_NAS = {
+    'AWH00', 'AWU05', 'AWU90',
+    'AWD05', 'AWD15E', 'AWD30', 'AWD45', 'AWD60', 'AWD60E', 'AWD85', 'AWD90',
+    'AOH00', 'AOU05', 'AOU90',
+    'AOD05', 'AOD15E', 'AOD30', 'AOD45', 'AOD45E', 'AOD60', 'AOD60E', 'AOD85', 'AOD90',
+    'SOH00', 'SOU05', 'SOU90',
+    'SOD05', 'SOD15', 'SOD45', 'SOD60', 'SOD85', 'SOD90',
+    'ADH00', 'ADU05', 'ADU90',
+    'ADD05', 'ADD15', 'ADD45', 'ADD60', 'ADD85', 'ADD90',
+}
+
+# Mapeamento de códigos curtos de flow pattern (formato NAS) para os nomes usados nos gráficos
+NAS_FLOW_PATTERN_MAP = {
+    'AN': 'Annular',
+    'SL': 'Slug',
+    'CH': 'Churn',
+    'SW': 'Stratified wavy',
+    'ST': 'Stratified',
+    'SS': 'Stratified Smooth',
+    'EB': 'Elongated bubble',
+    # Variantes com maiúscula/minúscula (normalizadas por strip().upper() na leitura)
+    'ANNULAR': 'Annular',
+    'SLUG': 'Slug',
+    'CHURN': 'Churn',
+    'STRATIFIED WAVY': 'Stratified wavy',
+    'STRATIFIED': 'Stratified',
+    'STRATIFIED SMOOTH': 'Stratified Smooth',
+    'ELONGATED BUBBLE': 'Elongated bubble',
+}
 
 def standardize_liquid_conditions(
     all_dataframes: dict,
@@ -169,7 +207,7 @@ def read_excel_file(file_path):
             return None, None
             
         # Verificar se é um arquivo Excel
-        if not file_path.lower().endswith(('.xlsx', '.xls')):
+        if not file_path.lower().endswith(('.xlsx', '.xls', '.xlsm')):
             print(f"Erro: Arquivo '{file_path}' não é um arquivo Excel válido.")
             return None, None
             
@@ -179,21 +217,32 @@ def read_excel_file(file_path):
         try:
             # Primeiro, tentar ler todas as abas
             excel_file = pd.ExcelFile(file_path)
-            print(f"Abas encontradas: {excel_file.sheet_names}")
+            all_sheets = excel_file.sheet_names
+
+            # Para arquivos NAS, considerar apenas as abas da lista ALLOWED_SHEETS_NAS
+            if NAS_file:
+                sheet_names = [s for s in all_sheets if s in ALLOWED_SHEETS_NAS]
+                if not sheet_names:
+                    sheet_names = all_sheets  # fallback de segurança
+            else:
+                sheet_names = all_sheets
+
+            print(f"Abas encontradas: {all_sheets}")
+            print(f"Abas consideradas para processamento: {sheet_names}")
             
             # Se houver múltiplas abas, perguntar qual usar
-            if len(excel_file.sheet_names) > 1:
+            if len(sheet_names) > 1:
                 print("\nMúltiplas abas encontradas:")
-                for i, sheet in enumerate(excel_file.sheet_names):
+                for i, sheet in enumerate(sheet_names):
                     print(f"{i+1}: {sheet}")
                 
                 while True:
                     try:
-                        choice = input(f"\nEscolha a aba (1-{len(excel_file.sheet_names)}) ou 'all' para todas: ").strip()
+                        choice = input(f"\nEscolha a aba (1-{len(sheet_names)}) ou 'all' para todas: ").strip()
                         if choice.lower() == 'all':
                             # Perguntar quais abas específicas o usuário quer processar
                             print("\nVocê escolheu 'all'. Agora selecione quais abas específicas deseja processar:")
-                            selected_sheets = get_user_sheet_selection(excel_file)
+                            selected_sheets = get_user_sheet_selection(excel_file, sheet_names)
                             
                             if not selected_sheets:
                                 print("Nenhuma aba selecionada. Retornando ao menu principal.")
@@ -204,7 +253,10 @@ def read_excel_file(file_path):
                             units_dict = {}
                             for sheet in selected_sheets:
                                 print(f"Lendo aba: {sheet}")
-                                df, units = read_single_sheet(file_path, sheet)
+                                if NAS_file:
+                                    df, units = read_single_sheet_nas(file_path, sheet)
+                                else:
+                                    df, units = read_single_sheet(file_path, sheet)
                                 if df is not None and units is not None:
                                     dataframes[sheet] = df
                                     units_dict[sheet] = units
@@ -218,10 +270,13 @@ def read_excel_file(file_path):
                                 continue
                         else:
                             sheet_index = int(choice) - 1
-                            if 0 <= sheet_index < len(excel_file.sheet_names):
-                                sheet_name = excel_file.sheet_names[sheet_index]
+                            if 0 <= sheet_index < len(sheet_names):
+                                sheet_name = sheet_names[sheet_index]
                                 print(f"Lendo aba: {sheet_name}")
-                                df, units = read_single_sheet(file_path, sheet_name)
+                                if NAS_file:
+                                    df, units = read_single_sheet_nas(file_path, sheet_name)
+                                else:
+                                    df, units = read_single_sheet(file_path, sheet_name)
                                 break
                             else:
                                 print("Escolha inválida. Tente novamente.")
@@ -229,9 +284,12 @@ def read_excel_file(file_path):
                         print("Entrada inválida. Digite um número ou 'all'.")
             else:
                 # Apenas uma aba
-                sheet_name = excel_file.sheet_names[0]
+                sheet_name = sheet_names[0]
                 print(f"Lendo aba: {sheet_name}")
-                df, units = read_single_sheet(file_path, sheet_name)
+                if NAS_file:
+                    df, units = read_single_sheet_nas(file_path, sheet_name)
+                else:
+                    df, units = read_single_sheet(file_path, sheet_name)
                 
         except Exception as e:
             print(f"Erro ao ler arquivo Excel: {e}")
@@ -302,6 +360,133 @@ def read_single_sheet(file_path, sheet_name):
         
     except Exception as e:
         print(f"Erro ao ler aba {sheet_name}: {e}")
+        return None, None
+
+
+def read_single_sheet_nas(file_path, sheet_name):
+    """
+    Lê uma aba específica do arquivo NAS, cujo formato é:
+    - Linha 4 (1-indexada): nomes das colunas (B até W)
+    - Linha 5: unidades
+    - Linhas 6 a 21: pontos experimentais
+
+    Args:
+        file_path (str): Caminho para o arquivo Excel
+        sheet_name (str): Nome da aba
+
+    Returns:
+        pd.DataFrame: DataFrame com os dados
+        dict: Dicionário com as unidades das colunas
+    """
+    try:
+        # Ler as primeiras 5 linhas para obter nomes das colunas e unidades (B:W)
+        df_header = pd.read_excel(
+            file_path,
+            sheet_name=sheet_name,
+            header=None,
+            nrows=5,
+            usecols="B:W",
+        )
+
+        # Nomes das colunas na linha 4 (índice 3, 0-indexado)
+        column_names = df_header.iloc[3].tolist()
+
+        # Unidades na linha 5 (índice 4)
+        units = df_header.iloc[4].tolist()
+
+        # Criar dicionário de unidades
+        units_dict = {}
+        for col_name, unit in zip(column_names, units):
+            if pd.notna(col_name) and pd.notna(unit):
+                units_dict[col_name] = unit
+            elif pd.notna(col_name):
+                units_dict[col_name] = ""
+
+        # Ler dados das linhas 6 a 21 (16 linhas), colunas B:W
+        df = pd.read_excel(
+            file_path,
+            sheet_name=sheet_name,
+            header=None,
+            skiprows=5,   # pula 5 linhas (1–5), começa na linha 6
+            nrows=16,     # 6–21
+            usecols="B:W",
+        )
+
+        # Definir nomes das colunas
+        df.columns = column_names
+
+        # Normalizar nomes importantes para se adequarem ao restante da rotina:
+        # - 'JL' (NAS) -> 'jL'
+        # - 'JG' (NAS) -> 'jG'
+        # - '-dP/dz F' (NAS) -> 'dp/dz_F'
+        # - '-dP/dz T' (se existir) -> 'dp/dz_T'
+        # - 'Alpha' / 'Void fraction' -> 'α'
+        # - 'FP' ou 'Flow pattern' -> 'Flow Pattern'
+        # - 'T' ou 'Temp' -> 'Temp.'
+        # - 'Pressure' / 'Gauge P' ou 'P' -> 'Gauge Pressure' (para cálculo de Re_sg)
+        def _nas_clean(s):
+            if not isinstance(s, str):
+                return ""
+            return s.strip().replace('\n', '').replace('\r', '').strip()
+        rename_map = {}
+        for col in df.columns:
+            clean = _nas_clean(col)
+            if clean:
+                if clean == 'JL':
+                    rename_map[col] = 'jL'
+                elif clean == 'JG':
+                    rename_map[col] = 'jG'
+                elif clean == '-dP/dz F':
+                    rename_map[col] = 'dp/dz_F'
+                elif clean == '-dP/dz T':
+                    rename_map[col] = 'dp/dz_T'
+                elif clean in ('Alpha', 'alpha', 'Void fraction', 'Void Fraction', 'void fraction', 'α'):
+                    rename_map[col] = 'α'
+                elif clean in ('FP', 'Flow pattern'):
+                    rename_map[col] = 'Flow Pattern'
+                elif clean in ('T', 'Temp', 'Temp.', 'T (C)', 'T(°C)'):
+                    rename_map[col] = 'Temp.'
+                elif clean in ('Pressure', 'P', 'Gauge P', 'Gauge P.', 'Gauge P (kPa)', 'P (kPa)'):
+                    rename_map[col] = 'Gauge Pressure'
+                # Fallback: variantes comuns no NAS (ex.: "Gauge P. " com espaço, "JG " etc.)
+                elif clean.upper() == 'JG':
+                    rename_map[col] = 'jG'
+                elif clean.upper().startswith('TEMP') or clean == 'T':
+                    rename_map[col] = 'Temp.'
+                elif clean.upper() == 'PRESSURE' or (clean.upper().startswith('GAUGE') and 'P' in clean.upper()):
+                    rename_map[col] = 'Gauge Pressure'
+
+        if rename_map:
+            df = df.rename(columns=rename_map)
+            # Atualizar também o dicionário de unidades para manter consistência
+            new_units_dict = {}
+            for col_name, unit in units_dict.items():
+                new_name = rename_map.get(col_name, col_name)
+                new_units_dict[new_name] = unit
+            units_dict = new_units_dict
+
+        # Interpretar flow pattern em curto (NAS) e converter para nomes completos
+        fp_col = None
+        for c in df.columns:
+            if isinstance(c, str) and c.strip() == 'Flow Pattern':
+                fp_col = c
+                break
+        if fp_col is not None:
+            def _nas_fp_to_full(val):
+                if pd.isna(val):
+                    return val
+                s = str(val).strip()
+                key = s.upper()
+                return NAS_FLOW_PATTERN_MAP.get(key, NAS_FLOW_PATTERN_MAP.get(s, val))
+            df[fp_col] = df[fp_col].apply(_nas_fp_to_full)
+
+        # Remover linhas totalmente vazias
+        df = df.dropna(how='all').reset_index(drop=True)
+
+        return df, units_dict
+
+    except Exception as e:
+        print(f"Erro ao ler aba NAS {sheet_name}: {e}")
         return None, None
 
 def save_dataframe_to_txt(df, units_dict, output_file, sheet_name=None):
@@ -488,23 +673,43 @@ def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
                 clean_col = str(col).strip()
                 col_mapping[clean_col] = col
         
-        # Verificar se as colunas necessárias estão disponíveis
-        missing_cols = []
-        for req_col in required_cols:
-            if req_col not in col_mapping:
-                missing_cols.append(req_col)
-        
+        # Coluna de void fraction: aceitar vários nomes (NAS e formato inicial)
+        alpha_col_key = None
+        for name in ('α', 'Alpha', 'alpha', 'Void fraction', 'Void Fraction', 'void fraction'):
+            if name in col_mapping:
+                alpha_col_key = name
+                break
+        if alpha_col_key is None:
+            # Tentar por similaridade (strip e case)
+            for col in available_cols:
+                if col is None or pd.isna(col):
+                    continue
+                c = str(col).strip().lower()
+                if c in ('α', 'alpha', 'void fraction') or c.replace(' ', '') == 'voidfraction':
+                    alpha_col_key = str(col).strip()
+                    col_mapping['α'] = col  # passar a usar 'α' daqui pra frente
+                    break
+        if alpha_col_key is None:
+            missing_cols = ['α (ou Alpha / Void fraction)']
+        else:
+            if alpha_col_key != 'α':
+                col_mapping['α'] = col_mapping[alpha_col_key]
+            missing_cols = []
+            for req_col in ['jG', 'jL', 'Flow Pattern']:
+                if req_col not in col_mapping:
+                    missing_cols.append(req_col)
+
         if missing_cols:
-            print(f"Colunas ausentes para plot: {missing_cols}")
+            print(f"Colunas ausentes para plot jG vs α: {missing_cols}")
             print(f"Colunas disponíveis: {list(col_mapping.keys())}")
             return
-        
+
         # Configurar estilo científico para LaTeX
         setup_plot_style()
-        
+
         # Criar figura
         fig, ax = plt.subplots(figsize=(10, 10))  # Figura quadrada 10x10
-        
+
         # Obter valores únicos de jL e agrupar por séries
         jl_col = col_mapping['jL']
         jg_col = col_mapping['jG']
@@ -513,6 +718,8 @@ def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         
         # Agrupar dados por jL (arredondando para 1 casa decimal para agrupar séries similares)
         df_plot = df.copy()
+        # Garantir α numérico (NAS pode trazer como string)
+        df_plot[alpha_col] = pd.to_numeric(df_plot[alpha_col], errors='coerce')
         df_plot['jL_rounded'] = df_plot[jl_col].round(1)
         
         # Obter séries únicas de jL
@@ -1134,15 +1341,32 @@ def generate_dpdzf_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         for label in ax.get_xticklabels() + ax.get_yticklabels():
             label.set_fontfamily('serif')
         
-        # Adicionar legenda para Re_sl
+        # Adicionar legenda para Re_sl com Re_sg nominal (médio) por série
         Re_sl_legend_elements = []
         for i, re_l in enumerate(Re_sl_series):
-            color = colors[i % len(colors)]
-            print(i)
             line_style = line_styles[i % len(line_styles)]
-            Re_sl_legend_elements.append(plt.Line2D([0], [0], color='black', linestyle=line_style, 
-                                               marker=vec_s_lines[i], mfc='silver',
-                                               markersize=12, label=rf'$Re_{{sl}}$ = {int(re_l)}'))
+            # Re_sg nominal (médio) para esta série de Re_sl
+            mask_re = df_plot['Re_sl_group'] == re_l
+            Re_sg_re = pd.to_numeric(Re_sg[mask_re], errors='coerce').dropna()
+            if len(Re_sg_re) > 0:
+                mean_Re_sg = float(Re_sg_re.mean())
+                mean_Re_sg_rounded = int(round(mean_Re_sg / 100.0) * 100)
+                series_label = rf'$Re_{{sl}}$ = {int(re_l)}, $Re_{{sg}} \approx$ {mean_Re_sg_rounded}'
+            else:
+                series_label = rf'$Re_{{sl}}$ = {int(re_l)}'
+
+            Re_sl_legend_elements.append(
+                plt.Line2D(
+                    [0],
+                    [0],
+                    color='black',
+                    linestyle=line_style,
+                    marker=vec_s_lines[i],
+                    mfc='silver',
+                    markersize=12,
+                    label=series_label,
+                )
+            )
         
         # Criar legenda única estilo painel em cima
         ax.legend(
@@ -1336,16 +1560,33 @@ def generate_dpdzt_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         for label in ax.get_xticklabels() + ax.get_yticklabels():
             label.set_fontfamily('serif')
         
-        # Adicionar legenda para Re_sl
+        # Adicionar legenda para Re_sl com Re_sg nominal (médio) por série
         Re_sl_legend_elements = []
         for i, re_l in enumerate(Re_sl_series):
-            color = colors[i % len(colors)]
-            print(i)
             line_style = line_styles[i % len(line_styles)]
-            Re_sl_legend_elements.append(plt.Line2D([0], [0], color='black', linestyle=line_style, 
-                                               marker=vec_s_lines[i], mfc='silver',
-                                               markersize=12, label=rf'$Re_{{sl}}$ = {int(re_l)}'))
-        
+            # Re_sg nominal (médio) para esta série de Re_sl
+            mask_re = df_plot['Re_sl_group'] == re_l
+            Re_sg_re = pd.to_numeric(Re_sg[mask_re], errors='coerce').dropna()
+            if len(Re_sg_re) > 0:
+                mean_Re_sg = float(Re_sg_re.mean())
+                mean_Re_sg_rounded = int(round(mean_Re_sg / 100.0) * 100)
+                series_label = rf'$Re_{{sl}}$ = {int(re_l)}, $Re_{{sg}} \approx$ {mean_Re_sg_rounded}'
+            else:
+                series_label = rf'$Re_{{sl}}$ = {int(re_l)}'
+
+            Re_sl_legend_elements.append(
+                plt.Line2D(
+                    [0],
+                    [0],
+                    color='black',
+                    linestyle=line_styles[i % len(line_styles)],
+                    marker=vec_s_lines[i],
+                    mfc='silver',
+                    markersize=12,
+                    label=series_label,
+                )
+            )
+
         ax.legend(
             handles=Re_sl_legend_elements + legend_elements,
             loc='lower center',
@@ -1441,22 +1682,32 @@ def create_orientation_summary_dataframe(all_dataframes, selected_sheets):
         alpha_col = col_mapping.get('α', None)
         dp_dz_t_col = col_mapping.get('dp/dz_T', None)
 
-        # Garantir Re_sg disponível (para cálculo de Re_sg médio por série)
+        # Garantir Re_sg disponível (para cálculo de Re_sg médio por série e legenda)
         if 'Re_sg' in df.columns:
             Re_sg_series = pd.to_numeric(df['Re_sg'], errors='coerce')
         else:
-            # Tentar calcular Re_sg usando as mesmas colunas dos outros plots
+            # Tentar calcular Re_sg usando jG, Temp e Pressure (nomes podem variar, ex.: NAS)
             Re_sg_series = pd.Series([np.nan] * len(df_temp), index=df_temp.index)
             try:
-                # Precisamos de jG, Temp. e Gauge Pressure
-                required_rg_cols = ['jG', 'Temp.', 'Gauge Pressure']
-                if all(col in col_mapping for col in required_rg_cols):
-                    jg_col = col_mapping['jG']
-                    T_col = col_mapping['Temp.']
-                    P_col = col_mapping['Gauge Pressure']
+                # Buscar colunas por qualquer nome usado no NAS ou formato padrão
+                def _find_col(*candidates):
+                    for k in candidates:
+                        if k in col_mapping:
+                            return col_mapping[k]
+                    norm = {str(k).strip().upper(): col_mapping[k] for k in col_mapping}
+                    for c in candidates:
+                        if c.upper() in norm:
+                            return norm[c.upper()]
+                    return None
+                jg_col = _find_col('jG', 'JG')
+                T_col = _find_col('Temp.', 'Temp', 'T', 'T (C)', 'T(°C)')
+                P_col = _find_col('Gauge Pressure', 'Gauge P', 'Gauge P.', 'P', 'Pressure', 'Gauge P (kPa)', 'P (kPa)')
+                if jg_col is not None and T_col is not None and P_col is not None:
                     D = 0.05251
-                    P_Pa = df[P_col] + 101325
-                    T_K = df[T_col] + 273
+                    P_vals = pd.to_numeric(df[P_col], errors='coerce')
+                    T_vals = pd.to_numeric(df[T_col], errors='coerce')
+                    P_Pa = P_vals + 101325
+                    T_K = T_vals + 273.15
                     rho_G = [PropsSI('D', 'P', p, 'T', t, fluid_1) for p, t in zip(P_Pa, T_K)]
                     mu_G = [PropsSI('V', 'P', p, 'T', t, fluid_1) for p, t in zip(P_Pa, T_K)]
                     Re_sg_series = pd.Series(
@@ -1464,15 +1715,40 @@ def create_orientation_summary_dataframe(all_dataframes, selected_sheets):
                         index=df.index
                     )
                 else:
-                    print(f"Aviso: não foi possível calcular Re_sg para {sheet_name} (colunas ausentes).")
+                    print(f"Aviso: não foi possível calcular Re_sg para {sheet_name} (colunas ausentes: jG/Temp/Pressure).")
             except Exception as e:
                 print(f"Erro ao calcular Re_sg para {sheet_name}: {e}")
 
         # Converter friccional e total para kPa/m e manter todos os pontos individuais
-        frictional_kpa = df_temp[dp_dz_f_col] / 1000.0
-        total_kpa = (df_temp[dp_dz_t_col] / 1000.0) if dp_dz_t_col in df_temp.columns else pd.Series([np.nan]*len(df_temp), index=df_temp.index)
+        # Garantir que os dados sejam numéricos (NAS_file pode trazer strings ou colunas duplicadas)
+        fric_col = df_temp[dp_dz_f_col]
+        # Se houver colunas duplicadas com o mesmo nome, df_temp[dp_dz_f_col] é um DataFrame.
+        if isinstance(fric_col, pd.DataFrame):
+            fric_col = fric_col.iloc[:, 0]
+        frictional_numeric = pd.to_numeric(fric_col, errors='coerce')
+        frictional_kpa = frictional_numeric / 1000.0
+
+        if dp_dz_t_col in df_temp.columns:
+            total_col = df_temp[dp_dz_t_col]
+            if isinstance(total_col, pd.DataFrame):
+                total_col = total_col.iloc[:, 0]
+            total_numeric = pd.to_numeric(total_col, errors='coerce')
+            total_kpa = total_numeric / 1000.0
+        else:
+            total_kpa = pd.Series([np.nan] * len(df_temp), index=df_temp.index)
         flow_pattern_series = df_temp[flow_pattern_col]
+        if isinstance(flow_pattern_series, pd.DataFrame):
+            flow_pattern_series = flow_pattern_series.iloc[:, 0]
         re_sl_series = df_temp['Re_sl_rounded']
+
+        # Preparar série de alpha (void fraction) garantindo tipo escalar/numerico
+        if alpha_col is not None and alpha_col in df_temp.columns:
+            alpha_data = df_temp[alpha_col]
+            if isinstance(alpha_data, pd.DataFrame):
+                alpha_data = alpha_data.iloc[:, 0]
+            alpha_series = pd.to_numeric(alpha_data, errors='coerce')
+        else:
+            alpha_series = pd.Series([np.nan] * len(df_temp), index=df_temp.index)
 
         # Identificador de ponto experimental (P01, P02, ...) baseado no índice da linha
         # Isso assume que a ordem das linhas é consistente entre as inclinações.
@@ -1481,15 +1757,22 @@ def create_orientation_summary_dataframe(all_dataframes, selected_sheets):
             fric_val = frictional_kpa.iloc[idx]
             total_val = total_kpa.iloc[idx]
             fp_val = flow_pattern_series.iloc[idx]
-            alpha_val = df_temp[alpha_col].iloc[idx] if alpha_col in df_temp.columns else np.nan
+            # Se no NAS o flow pattern ainda vier em curto, normalizar para o nome completo
+            if pd.notna(fp_val) and isinstance(fp_val, str):
+                key = fp_val.strip().upper()
+                fp_val = NAS_FLOW_PATTERN_MAP.get(key, NAS_FLOW_PATTERN_MAP.get(fp_val.strip(), fp_val))
+            alpha_val = alpha_series.iloc[idx]
             re_sg_val = Re_sg_series.iloc[idx] if not Re_sg_series.isna().all() else np.nan
             point_id = f"P{idx+1:02d}"
             
             if pd.isna(re_sl_val) or pd.isna(fric_val) or pd.isna(fp_val):
                 continue
             
+            # Sistema bifásico: primeiros 2 caracteres da aba (AW, AO, SO, AD, etc.)
+            system = str(sheet_name)[:2] if sheet_name else ""
             summary_data.append({
                 'sheet_name': sheet_name,
+                'system': system,
                 'theta': theta,
                 'Re_sl': int(re_sl_val),
                 'frictional': fric_val,
@@ -1607,6 +1890,16 @@ def prepare_orientation_summary(all_dataframes, selected_sheets, tolerance_perce
     return summary_df, orientation_plots_dir, unique_re_sl
 
 
+# Cores por sistema bifásico (AW, AO, SO, AD) para gráficos de orientação com múltiplos sistemas
+SYSTEM_COLORS = {
+    'AW': 'C0',   # azul
+    'AO': 'C2',   # verde
+    'SO': 'C3',   # vermelho
+    'AD': 'C4',   # castanho
+}
+SYSTEM_COLOR_LIST = ['C0', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C8', 'C9']
+
+
 def _generate_orientation_plot_for_quantity(
     summary_df,
     orientation_plots_dir,
@@ -1617,8 +1910,9 @@ def _generate_orientation_plot_for_quantity(
 ):
     """
     Gera gráficos genéricos de (quantidade y_column) vs orientação θ para cada Re_sl,
-    conectando pontos com o mesmo point_id (P01, P02, ...) entre inclinações e
-    usando a mesma convenção de legendas.
+    conectando pontos com o mesmo point_id (P01, P02, ...) entre inclinações.
+    Se houver mais de um sistema bifásico (AW, AO, SO, AD), cada sistema usa uma cor
+    e a legenda indica o sistema; com um único sistema as linhas permanecem pretas.
     """
     setup_plot_style()
     flow_pattern_symbols = get_flow_pattern_symbols()
@@ -1634,60 +1928,145 @@ def _generate_orientation_plot_for_quantity(
         point_ids = sorted(data_re['point_id'].unique())
         line_styles = ['-', '--', ':', '-.']
 
+        # Verificar se há mais de um sistema bifásico (coluna 'system' = primeiros 2 chars da aba)
+        systems = []
+        if 'system' in data_re.columns:
+            systems = sorted(data_re['system'].dropna().unique())
+            systems = [s for s in systems if str(s).strip()]
+        multi_system = len(systems) > 1
+        if multi_system:
+            system_to_color = {}
+            for idx, sys in enumerate(systems):
+                sys_str = str(sys).strip().upper()
+                system_to_color[sys] = SYSTEM_COLORS.get(sys_str, SYSTEM_COLOR_LIST[idx % len(SYSTEM_COLOR_LIST)])
+        else:
+            line_color = 'black'
+
         fig, ax = plt.subplots(figsize=(12, 8))
         series_legend_elements = []
 
-        for i, pid in enumerate(point_ids):
-            serie = data_re[data_re['point_id'] == pid].sort_values('theta')
-            if serie.empty or serie[y_column].isna().all():
-                continue
-
-            ax.plot(
-                serie['theta'],
-                serie[y_column],
-                linestyle=line_styles[i % len(line_styles)],
-                color='black',
-                linewidth=1.2,
-                zorder=1,
-                alpha=0.7,
-            )
-
-            for _, row in serie.iterrows():
-                if pd.isna(row[y_column]):
+        if multi_system:
+            # Uma linha por (point_id, system); cor = sistema, estilo = point_id
+            for i, pid in enumerate(point_ids):
+                for sys in systems:
+                    subset = data_re[(data_re['point_id'] == pid) & (data_re['system'] == sys)]
+                    subset = subset.sort_values('theta')
+                    if subset.empty or subset[y_column].isna().all():
+                        continue
+                    color = system_to_color[sys]
+                    ax.plot(
+                        subset['theta'],
+                        subset[y_column],
+                        linestyle=line_styles[i % len(line_styles)],
+                        color=color,
+                        linewidth=1.2,
+                        zorder=1,
+                        alpha=0.7,
+                    )
+                    for _, row in subset.iterrows():
+                        if pd.isna(row[y_column]):
+                            continue
+                        pattern_data = flow_pattern_symbols.get(
+                            row['flow_pattern'], {'symbol': 'o', 'color': 'gray'}
+                        )
+                        symbol = pattern_data['symbol']
+                        pattern_color = pattern_data['color']
+                        ax.scatter(
+                            row['theta'],
+                            row[y_column],
+                            c=pattern_color,
+                            marker=symbol,
+                            s=150,
+                            edgecolors=color,
+                            linewidth=1.5,
+                            zorder=2,
+                            alpha=0.9,
+                        )
+            # Legenda: primeiro uma entrada por sistema (cor)
+            for sys in systems:
+                series_legend_elements.append(
+                    plt.Line2D(
+                        [0], [0],
+                        linestyle='-',
+                        color=system_to_color[sys],
+                        linewidth=2.5,
+                        label=str(sys),
+                    )
+                )
+            # Depois uma entrada por point_id (Re_sg, estilo de linha em cinza)
+            for i, pid in enumerate(point_ids):
+                serie = data_re[data_re['point_id'] == pid].sort_values('theta')
+                if serie.empty:
                     continue
-                pattern_data = flow_pattern_symbols.get(
-                    row['flow_pattern'], {'symbol': 'o', 'color': 'gray'}
+                if 'Re_sg' in serie.columns and not serie['Re_sg'].isna().all():
+                    mean_Re_sg = float(serie['Re_sg'].mean())
+                    mean_Re_sg_rounded = int(round(mean_Re_sg / 100.0) * 100)
+                    series_label = rf"$Re_{{sg}} \approx$ {mean_Re_sg_rounded}"
+                else:
+                    series_label = f"{pid}"
+                series_legend_elements.append(
+                    plt.Line2D(
+                        [0], [0],
+                        linestyle=line_styles[i % len(line_styles)],
+                        color='gray',
+                        linewidth=1.5,
+                        label=series_label,
+                    )
                 )
-                symbol = pattern_data['symbol']
-                pattern_color = pattern_data['color']
-                ax.scatter(
-                    row['theta'],
-                    row[y_column],
-                    c=pattern_color,
-                    marker=symbol,
-                    s=150,
-                    edgecolors='black',
-                    linewidth=1.5,
-                    zorder=2,
-                    alpha=0.9,
-                )
+        else:
+            # Um único sistema (ou nenhum): linhas em preto como antes
+            for i, pid in enumerate(point_ids):
+                serie = data_re[data_re['point_id'] == pid].sort_values('theta')
+                if serie.empty or serie[y_column].isna().all():
+                    continue
 
-            if 'Re_sg' in serie.columns and not serie['Re_sg'].isna().all():
-                mean_Re_sg = serie['Re_sg'].mean()
-                series_label = rf"$Re_{{sg}} \approx$ {int(round(mean_Re_sg))}"
-            else:
-                series_label = f"{pid}"
-
-            series_legend_elements.append(
-                plt.Line2D(
-                    [0],
-                    [0],
+                ax.plot(
+                    serie['theta'],
+                    serie[y_column],
                     linestyle=line_styles[i % len(line_styles)],
-                    color='black',
-                    linewidth=1.5,
-                    label=series_label,
+                    color=line_color,
+                    linewidth=1.2,
+                    zorder=1,
+                    alpha=0.7,
                 )
-            )
+
+                for _, row in serie.iterrows():
+                    if pd.isna(row[y_column]):
+                        continue
+                    pattern_data = flow_pattern_symbols.get(
+                        row['flow_pattern'], {'symbol': 'o', 'color': 'gray'}
+                    )
+                    symbol = pattern_data['symbol']
+                    pattern_color = pattern_data['color']
+                    ax.scatter(
+                        row['theta'],
+                        row[y_column],
+                        c=pattern_color,
+                        marker=symbol,
+                        s=150,
+                        edgecolors='black',
+                        linewidth=1.5,
+                        zorder=2,
+                        alpha=0.9,
+                    )
+
+                if 'Re_sg' in serie.columns and not serie['Re_sg'].isna().all():
+                    mean_Re_sg = float(serie['Re_sg'].mean())
+                    mean_Re_sg_rounded = int(round(mean_Re_sg / 100.0) * 100)
+                    series_label = rf"$Re_{{sg}} \approx$ {mean_Re_sg_rounded}"
+                else:
+                    series_label = f"{pid}"
+
+                series_legend_elements.append(
+                    plt.Line2D(
+                        [0],
+                        [0],
+                        linestyle=line_styles[i % len(line_styles)],
+                        color='black',
+                        linewidth=1.5,
+                        label=series_label,
+                    )
+                )
 
         if not series_legend_elements:
             plt.close(fig)
@@ -1699,12 +2078,29 @@ def _generate_orientation_plot_for_quantity(
         ax.minorticks_on()
         ax.grid(True, which='major', alpha=0.3, linestyle='-', linewidth=0.8)
         ax.grid(True, which='minor', alpha=0.2, linestyle=':', linewidth=0.5)
-        ax.tick_params(axis='both', which='major', labelsize=18)
-        ax.tick_params(axis='both', which='minor', labelsize=14)
+        # Tamanho um pouco menor para os valores dos eixos
+        ax.tick_params(axis='both', which='major', labelsize=14)
+        ax.tick_params(axis='both', which='minor', labelsize=10)
         for label in ax.get_xticklabels() + ax.get_yticklabels():
             label.set_fontfamily('serif')
-        ax.set_xlim(left=-95, right=10)
-        ax.set_xticks(np.arange(-90, 11, 10))
+
+        # Limites de θ com margem de 5° para menos e para mais
+        theta_min = float(data_re['theta'].min())
+        theta_max = float(data_re['theta'].max())
+        x_min = theta_min - 5.0
+        x_max = theta_max + 5.0
+        ax.set_xlim(left=x_min, right=x_max)
+
+        # Ticks principais apenas em múltiplos de 10° dentro do intervalo
+        start_tick = np.ceil(x_min / 10.0) * 10.0
+        end_tick = np.floor(x_max / 10.0) * 10.0
+        if start_tick <= end_tick:
+            ax.set_xticks(np.arange(start_tick, end_tick + 1e-6, 10.0))
+        else:
+            # Caso degenerado (intervalo muito pequeno), não força ticks especiais
+            ax.set_xticks([theta_min, theta_max])
+
+        # Minor ticks continuam em 5° para auxiliar leitura
         ax.xaxis.set_minor_locator(MultipleLocator(5))
 
         used_patterns = data_re['flow_pattern'].unique()
@@ -1739,31 +2135,74 @@ def _generate_orientation_plot_for_quantity(
             prop={'family': 'serif'},
         )
 
+        # # Inserir texto com o Reynolds de líquido nominal (Re_sl), arredondado para a centena
+        # try:
+        #     re_sl_nominal = float(re_l)
+        #     re_sl_nominal_rounded = int(round(re_sl_nominal / 100.0) * 100)
+        #     # Posição: canto superior esquerdo do painel, com pequena margem
+        #     x_text = ax.get_xlim()[0] + 0.02 * (ax.get_xlim()[1] - ax.get_xlim()[0])
+        #     y_text = ax.get_ylim()[1] - 0.05 * (ax.get_ylim()[1] - ax.get_ylim()[0])
+        #     ax.text(
+        #         x_text,
+        #         y_text,
+        #         rf"$Re_{{sl}} \approx {re_sl_nominal_rounded}$",
+        #         fontsize=16,
+        #         fontfamily='serif',
+        #     )
+        # except Exception:
+        #     pass
+
+        # Ajustar limites específicos para alpha (0 a 1)
+        if y_column == 'alpha':
+            ax.set_ylim(bottom=0.0, top=1.0)
+
+        # Inserir texto com o Reynolds de líquido nominal (Re_sl), arredondado para a centena,
+        # posicionado no canto inferior direito do painel.
+        try:
+            re_sl_nominal = float(re_l)
+            re_sl_nominal_rounded = int(round(re_sl_nominal / 100.0) * 100)
+            x_min, x_max = ax.get_xlim()
+            y_min, y_max = ax.get_ylim()
+            x_text = x_max - 0.02 * (x_max - x_min)
+            y_text = y_min + 0.05 * (y_max - y_min)
+            ax.text(
+                x_text,
+                y_text,
+                rf"$Re_{{sl}} \approx {re_sl_nominal_rounded}$",
+                fontsize=16,
+                fontfamily='serif',
+                ha='right',
+                va='bottom',
+            )
+        except Exception:
+            pass
+
         plt.tight_layout()
         base_name = f"{base_name_prefix}_Re_sl_{re_l}"
         pdf_file = os.path.join(orientation_plots_dir, f"{base_name}.pdf")
         png_file = os.path.join(orientation_plots_dir, f"{base_name}.png")
 
-        plt.savefig(
-            pdf_file,
-            format='pdf',
-            dpi=300,
-            bbox_inches='tight',
-            pad_inches=0.1,
-            facecolor='white',
-            edgecolor='none',
-        )
+        with open(os.devnull, 'w') as devnull:
+            with redirect_stderr(devnull):
+                plt.savefig(
+                    pdf_file,
+                    format='pdf',
+                    dpi=300,
+                    bbox_inches='tight',
+                    pad_inches=0.1,
+                    facecolor='white',
+                    edgecolor='none',
+                )
+                plt.savefig(
+                    png_file,
+                    format='png',
+                    dpi=300,
+                    bbox_inches='tight',
+                    pad_inches=0.1,
+                    facecolor='white',
+                    edgecolor='none',
+                )
         print(f"Plot PDF salvo: {pdf_file}")
-
-        plt.savefig(
-            png_file,
-            format='png',
-            dpi=300,
-            bbox_inches='tight',
-            pad_inches=0.1,
-            facecolor='white',
-            edgecolor='none',
-        )
         print(f"Plot PNG salvo: {png_file}")
 
         plt.close(fig)
@@ -1850,7 +2289,7 @@ def generate_total_vs_orientation_plot(all_dataframes, selected_sheets, units_di
         import traceback
         traceback.print_exc()
 
-def get_user_sheet_selection(excel_file):
+def get_user_sheet_selection(excel_file, sheet_names=None):
     """
     Solicita ao usuário que escolha quais abas processar.
     
@@ -1860,8 +2299,12 @@ def get_user_sheet_selection(excel_file):
     Returns:
         list: Lista das abas selecionadas pelo usuário
     """
+    # Se não for fornecida uma lista de abas, usar todas as abas do arquivo
+    if sheet_names is None:
+        sheet_names = excel_file.sheet_names
+
     print("\nAbas disponíveis:")
-    for i, sheet in enumerate(excel_file.sheet_names):
+    for i, sheet in enumerate(sheet_names):
         print(f"{i+1}: {sheet}")
     
     while True:
@@ -1869,7 +2312,8 @@ def get_user_sheet_selection(excel_file):
             choice = input(f"\nEscolha as abas (ex: '2 3 4 5 6 8 10 11') ou 'all' para todas: ").strip()
             
             if choice.lower() == 'all':
-                return excel_file.sheet_names
+                # Retornar todas as abas consideradas (já filtradas, se for NAS_file)
+                return sheet_names
             
             # Processar entrada separada por espaços (ex: '2 3 4 5 6 8 10 11')
             selected_indices = []
@@ -1878,17 +2322,17 @@ def get_user_sheet_selection(excel_file):
             for num_str in numbers:
                 if num_str.isdigit():
                     index = int(num_str) - 1
-                    if 0 <= index < len(excel_file.sheet_names):
+                    if 0 <= index < len(sheet_names):
                         selected_indices.append(index)
                     else:
-                        print(f"Número {num_str} inválido. Escolha entre 1 e {len(excel_file.sheet_names)}")
+                        print(f"Número {num_str} inválido. Escolha entre 1 e {len(sheet_names)}")
                         break
                 else:
                     print(f"'{num_str}' não é um número válido.")
                     break
             else:
                 # Se chegou aqui, todos os números são válidos
-                selected_sheets = [excel_file.sheet_names[i] for i in selected_indices]
+                selected_sheets = [sheet_names[i] for i in selected_indices]
                 print(f"Abas selecionadas: {selected_sheets}")
                 return selected_sheets
                 
