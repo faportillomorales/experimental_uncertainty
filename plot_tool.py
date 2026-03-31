@@ -683,14 +683,13 @@ def get_flow_pattern_symbols():
     """Retorna o dicionário de símbolos para Flow Patterns baseado nos dados atuais do Excel"""
     return {
         # Padrões encontrados no arquivo Excel atual (análise detalhada)
-        'Annular': {'symbol': 'o', 'color': 'blue'},              # Annular
-        'Churn': {'symbol': 's', 'color': 'yellow'},               # Churn
-        'Elongated bubble': {'symbol': 'o', 'color': 'lightblue'}, # Elongated bubble (minúsculo)
-        'Stratified Smooth': {'symbol': 'v', 'color': 'purple'},                 # Stratified Smooth
+        'Annular': {'symbol': 'o', 'color': 'aqua'},              # Annular
+        'Churn': {'symbol': 'h', 'color': 'gold'},               # Churn
+        'Elongated bubble': {'symbol': 'P', 'color': 'lime'}, # Elongated bubble (minúsculo)
+        'Stratified Smooth': {'symbol': 'v', 'color': 'maroon'},                 # Stratified Smooth
         'Stratified': {'symbol': '^', 'color': 'red'},                    # Stratified
-        'Stratified wavy': {'symbol': '^', 'color': 'orange'},                 # Stratified Wavy
-        'Slug': {'symbol': 's', 'color': 'darkgreen'},            # Slug
-        'Stratified': {'symbol': '^', 'color': 'darkred'},        # Stratified
+        'Stratified wavy': {'symbol': '>', 'color': 'orange'},                 # Stratified Wavy
+        'Slug': {'symbol': 's', 'color': 'limegreen'},            # Slug
         
         # # Padrões legados (mantidos para compatibilidade)
         # 'Elongated Bubble': {'symbol': 'o', 'color': 'lightblue'}, # Versão com maiúscula
@@ -2261,6 +2260,7 @@ def _generate_orientation_plot_for_quantity(
     conectando pontos com o mesmo point_id (P01, P02, ...) entre inclinações.
     Se houver mais de um sistema bifásico (AW, AO, SO, AD), cada sistema usa uma cor
     e a legenda indica o sistema; com um único sistema as linhas permanecem pretas.
+    Proporção da figura, legenda no topo (ncol, estilo) e ticks principais seguem alpha_vs_jg.
     """
     setup_plot_style()
     flow_pattern_symbols = get_flow_pattern_symbols()
@@ -2290,7 +2290,8 @@ def _generate_orientation_plot_for_quantity(
         else:
             line_color = 'black'
 
-        fig, ax = plt.subplots(figsize=(12, 8))
+        # Mesma proporção que alpha_vs_jg (figura quadrada 10×10)
+        fig, ax = plt.subplots(figsize=(10, 10))
         series_legend_elements = []
 
         if multi_system:
@@ -2424,9 +2425,8 @@ def _generate_orientation_plot_for_quantity(
         ax.set_ylabel(y_label, fontsize=24, fontfamily='serif')
         ax.set_axisbelow(True)
         ax.minorticks_on()
-        # Tamanho um pouco menor para os valores dos eixos
-        ax.tick_params(axis='both', which='major', labelsize=14)
-        ax.tick_params(axis='both', which='minor', labelsize=10)
+        # Ticks como em alpha_vs_jg
+        ax.tick_params(axis='both', which='major', labelsize=18)
         for label in ax.get_xticklabels() + ax.get_yticklabels():
             label.set_fontfamily('serif')
 
@@ -2449,6 +2449,11 @@ def _generate_orientation_plot_for_quantity(
         # Minor ticks continuam em 5° para auxiliar leitura
         ax.xaxis.set_minor_locator(MultipleLocator(5))
 
+        # Limites e ticks Y para void fraction (como alpha_vs_jg)
+        if y_column == 'alpha':
+            ax.set_ylim(bottom=0.0, top=1.0)
+            ax.yaxis.set_major_locator(MultipleLocator(0.1))
+
         used_patterns = data_re['flow_pattern'].unique()
         pattern_legend_elements = []
         for pattern in sorted(used_patterns):
@@ -2469,52 +2474,46 @@ def _generate_orientation_plot_for_quantity(
                 )
             )
 
-        combined_handles = series_legend_elements + pattern_legend_elements
-        n_h = len(combined_handles)
-        ncol_leg = max(3, min(6, (n_h + 2) // 3))
-        ax.legend(handles=combined_handles, ncol=ncol_leg, **LEGEND_TOP_KWARGS)
-
-        # # Inserir texto com o Reynolds de líquido nominal (Re_sl), arredondado para a centena
-        # try:
-        #     re_sl_nominal = float(re_l)
-        #     re_sl_nominal_rounded = int(round(re_sl_nominal / 100.0) * 100)
-        #     # Posição: canto superior esquerdo do painel, com pequena margem
-        #     x_text = ax.get_xlim()[0] + 0.02 * (ax.get_xlim()[1] - ax.get_xlim()[0])
-        #     y_text = ax.get_ylim()[1] - 0.05 * (ax.get_ylim()[1] - ax.get_ylim()[0])
-        #     ax.text(
-        #         x_text,
-        #         y_text,
-        #         rf"$Re_{{sl}} \approx {re_sl_nominal_rounded}$",
-        #         fontsize=16,
-        #         fontfamily='serif',
-        #     )
-        # except Exception:
-        #     pass
-
-        # Ajustar limites específicos para alpha (0 a 1)
-        if y_column == 'alpha':
-            ax.set_ylim(bottom=0.0, top=1.0)
-
         apply_subtle_gray_grid(ax)
 
-        # Inserir texto com o Reynolds de líquido nominal (Re_sl), arredondado para a centena,
-        # posicionado no canto inferior direito do painel.
+        combined_handles = series_legend_elements + pattern_legend_elements
+        ax.legend(
+            handles=combined_handles,
+            ncol=LEGEND_TOP_NCOL,
+            **LEGEND_TOP_KWARGS,
+        )
+
+        # Reynolds de líquido nominal (Re_sl), arredondado à centena.
+        # Frictional e total: centro inferior; alpha: canto inferior direito.
         try:
             re_sl_nominal = float(re_l)
             re_sl_nominal_rounded = int(round(re_sl_nominal / 100.0) * 100)
-            x_min, x_max = ax.get_xlim()
-            y_min, y_max = ax.get_ylim()
-            x_text = x_max - 0.02 * (x_max - x_min)
-            y_text = y_min + 0.05 * (y_max - y_min)
-            ax.text(
-                x_text,
-                y_text,
-                rf"$Re_{{sl}} \approx {re_sl_nominal_rounded}$",
-                fontsize=16,
-                fontfamily='serif',
-                ha='right',
-                va='bottom',
-            )
+            label = rf"$Re_{{sl}} \approx {re_sl_nominal_rounded}$"
+            if y_column in ('frictional', 'total'):
+                ax.text(
+                    0.5,
+                    0.03,
+                    label,
+                    transform=ax.transAxes,
+                    fontsize=16,
+                    fontfamily='serif',
+                    ha='center',
+                    va='bottom',
+                )
+            else:
+                x_min, x_max = ax.get_xlim()
+                y_min, y_max = ax.get_ylim()
+                x_text = x_max - 0.02 * (x_max - x_min)
+                y_text = y_min + 0.05 * (y_max - y_min)
+                ax.text(
+                    x_text,
+                    y_text,
+                    label,
+                    fontsize=16,
+                    fontfamily='serif',
+                    ha='right',
+                    va='bottom',
+                )
         except Exception:
             pass
 
