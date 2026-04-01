@@ -4,7 +4,6 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import MultipleLocator
 from CoolProp.CoolProp import PropsSI
 import os
-import sys
 from pathlib import Path
 import warnings
 from contextlib import redirect_stderr
@@ -25,6 +24,7 @@ LEGEND_TOP_KWARGS = {
     'prop': {'family': 'serif'},
 }
 LEGEND_TOP_NCOL = 4
+PIPE_DIAMETER_M = 0.05251
 
 
 def get_series_line_and_marker_styles():
@@ -98,7 +98,7 @@ def standardize_liquid_conditions(
     target_jl_levels=(0.2, 0.4, 0.8, 1.6),
     jl_group_size=4,
     jl_tolerance=0.05,
-    D=0.05251,
+    D=PIPE_DIAMETER_M,
 ):
     """
     Padroniza a condição do líquido para todas as inclinações/abas.
@@ -690,29 +690,6 @@ def get_flow_pattern_symbols():
         'Stratified': {'symbol': '^', 'color': 'red'},                    # Stratified
         'Stratified wavy': {'symbol': '>', 'color': 'orange'},                 # Stratified Wavy
         'Slug': {'symbol': 's', 'color': 'limegreen'},            # Slug
-        
-        # # Padrões legados (mantidos para compatibilidade)
-        # 'Elongated Bubble': {'symbol': 'o', 'color': 'lightblue'}, # Versão com maiúscula
-        # 'slug': {'symbol': 's', 'color': 'green'},
-        # 'Estratificado': {'symbol': 'D', 'color': 'orange'},
-        # 'SW/MI': {'symbol': 'p', 'color': 'cyan'},
-        # 'Intermittent (Slug Wavy)²': {'symbol': 'h', 'color': 'magenta'},
-        # 'Intermittent (Slug Wavy) ²': {'symbol': 'h', 'color': 'magenta'},
-        # 'Intermittent (Slug Wavy)¹ ²': {'symbol': 'H', 'color': 'brown'},
-        # 'Rolling Wave²': {'symbol': 'D', 'color': 'pink'},
-        # 'DBubbly': {'symbol': 'P', 'color': 'gray'},
-        # 'SL (I)': {'symbol': 's', 'color': 'maroon'},
-        # 'annular': {'symbol': 'o', 'color': 'blue'},
-        # 'churn': {'symbol': 's', 'color': 'green'},
-        # 'Churn/bolhas?': {'symbol': 's', 'color': 'green'},
-        # 'Churn?': {'symbol': 's', 'color': 'green'},
-        # 'bubbles': {'symbol': 'o', 'color': 'blue'},
-        # 'Intermittent': {'symbol': 'h', 'color': 'magenta'},
-        # 'A': {'symbol': 'o', 'color': 'blue'},                    # Annular abreviado
-        # 'AN': {'symbol': 'o', 'color': 'blue'},                   # Annular abreviado
-        # 'CH': {'symbol': 's', 'color': 'green'},                  # Churn abreviado
-        # 'SL': {'symbol': 's', 'color': 'darkgreen'},              # Slug abreviado
-        # 'sw': {'symbol': '^', 'color': 'orange'}                 # Stratified Wavy minúsculo
     }
 
 
@@ -744,6 +721,144 @@ def _assign_numeric_to_first_named_column(df, col_name, numeric_series):
         df[col_name] = pd.to_numeric(numeric_series, errors='coerce')
 
 
+# kwargs comuns para savefig dos plots por aba
+PLOT_SAVEFIG_KWARGS = {
+    'dpi': 300,
+    'bbox_inches': 'tight',
+    'pad_inches': 0.1,
+    'facecolor': 'white',
+    'edgecolor': 'none',
+}
+
+
+def build_column_mapping(df):
+    """Mapeia nome de coluna normalizado (strip) → coluna original do DataFrame."""
+    col_mapping = {}
+    for col in df.columns:
+        if pd.notna(col):
+            col_mapping[str(col).strip()] = col
+    return col_mapping
+
+
+def missing_column_keys(col_mapping, required_keys):
+    """Lista de chaves em required_keys que não existem em col_mapping."""
+    return [k for k in required_keys if k not in col_mapping]
+
+
+def ensure_alpha_in_column_mapping(col_mapping, columns_iterable):
+    """
+    Garante col_mapping['α'] a partir de nomes alternativos (NAS / Excel).
+    Retorna True se encontrou; caso contrário False.
+    """
+    for name in ('α', 'Alpha', 'alpha', 'Void fraction', 'Void Fraction', 'void fraction'):
+        if name in col_mapping:
+            if name != 'α':
+                col_mapping['α'] = col_mapping[name]
+            return True
+    for col in columns_iterable:
+        if col is None or pd.isna(col):
+            continue
+        c = str(col).strip().lower()
+        if c in ('α', 'alpha', 'void fraction') or c.replace(' ', '') == 'voidfraction':
+            key = str(col).strip()
+            col_mapping['α'] = col_mapping[key]
+            return True
+    return False
+
+
+def compute_Re_sg_column(df, col_mapping, fluid_1, D=PIPE_DIAMETER_M):
+    """Calcula Re_sg ponto a ponto e grava em df['Re_sg'] (CoolProp + jG, P, T)."""
+    jg_col = col_mapping['jG']
+    P_col = col_mapping['Gauge Pressure']
+    T_col = col_mapping['Temp.']
+    P_Pa = pd.to_numeric(_one_col_series(df, P_col), errors='coerce') + 101325
+    T_K = pd.to_numeric(_one_col_series(df, T_col), errors='coerce') + 273
+    rho_G = [PropsSI('D', 'P', p, 'T', t, fluid_1) for p, t in zip(P_Pa, T_K)]
+    mu_G = [PropsSI('V', 'P', p, 'T', t, fluid_1) for p, t in zip(P_Pa, T_K)]
+    jg_vals = pd.to_numeric(_one_col_series(df, jg_col), errors='coerce')
+    df['Re_sg'] = pd.Series(
+        np.array(rho_G) * jg_vals.values * D / np.array(mu_G),
+        index=df.index,
+    )
+
+
+def save_figure_to_sheet_dir(base_name, sheet_name):
+    """Guarda PDF e PNG em dirname(file_path)/sheet_name/."""
+    sheet_dir = os.path.join(os.path.dirname(file_path), sheet_name)
+    os.makedirs(sheet_dir, exist_ok=True)
+    pdf_file = os.path.join(sheet_dir, f'{base_name}.pdf')
+    png_file = os.path.join(sheet_dir, f'{base_name}.png')
+    plt.savefig(pdf_file, format='pdf', **PLOT_SAVEFIG_KWARGS)
+    print(f'Plot PDF salvo: {pdf_file}')
+    plt.savefig(png_file, format='png', **PLOT_SAVEFIG_KWARGS)
+    print(f'Plot PNG salvo: {png_file}')
+
+
+def flow_pattern_legend_handles(df_plot, flow_pattern_col, flow_pattern_symbols=None):
+    """Handles matplotlib para legenda dos flow patterns presentes em df_plot."""
+    if flow_pattern_symbols is None:
+        flow_pattern_symbols = get_flow_pattern_symbols()
+    used = set()
+    for pattern in _one_col_series(df_plot, flow_pattern_col).dropna().unique():
+        if pattern in flow_pattern_symbols:
+            used.add(pattern)
+    handles = []
+    for pattern in sorted(used):
+        pd_ = flow_pattern_symbols.get(pattern, {'symbol': 'x', 'color': 'gray'})
+        symbol, color = pd_['symbol'], pd_['color']
+        handles.append(
+            plt.Line2D(
+                [0],
+                [0],
+                marker=symbol,
+                color='w',
+                markerfacecolor=color,
+                markersize=8,
+                markeredgecolor='black',
+                markeredgewidth=1,
+                label=pattern,
+            )
+        )
+    return handles
+
+
+def style_axes_re_g_log_x(ax, *, y_major_step=0.5, y_bottom=0, y_top=None):
+    """Eixo X log (Re_sg), limites padrão; eixo Y linear com passo principal fixo."""
+    ax.set_axisbelow(True)
+    ax.minorticks_on()
+    ax.yaxis.set_major_locator(MultipleLocator(y_major_step))
+    ax.set_xlim(1000, 250000)
+    if y_top is not None:
+        ax.set_ylim(y_bottom, y_top)
+    else:
+        ax.set_ylim(bottom=y_bottom)
+    ax.set_xscale('log')
+    ax.tick_params(axis='both', which='major', labelsize=18, size=8)
+    ax.tick_params(axis='both', which='minor', labelsize=18, size=6)
+    for lb in ax.get_xticklabels() + ax.get_yticklabels():
+        lb.set_fontfamily('serif')
+    apply_subtle_gray_grid(ax)
+
+
+def re_sl_legend_handles_from_meta(legend_series_meta):
+    """legend_series_meta: sequência de (re_l, linestyle, marker_char)."""
+    out = []
+    for re_l, line_style, s_lines in legend_series_meta:
+        out.append(
+            plt.Line2D(
+                [0],
+                [0],
+                color='black',
+                linestyle=line_style,
+                marker=s_lines,
+                mfc='silver',
+                markersize=12,
+                label=rf'$Re_{{sl}}$ = {int(re_l)}',
+            )
+        )
+    return out
+
+
 def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
     """
     Gera um plot científico de jG vs α, onde cada jL é uma série diferente.
@@ -754,53 +869,20 @@ def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         sheet_name (str): Nome da aba/sheet
     """
     try:
-        # Verificar se as colunas necessárias existem (com possíveis espaços)
-        required_cols = ['jG', 'jL', 'α', 'Flow Pattern']
         available_cols = list(df.columns)
-        
-        # Mapear nomes de colunas (removendo espaços extras)
-        col_mapping = {}
-        for col in available_cols:
-            if pd.notna(col):
-                clean_col = str(col).strip()
-                col_mapping[clean_col] = col
-        
-        # Coluna de void fraction: aceitar vários nomes (NAS e formato inicial)
-        alpha_col_key = None
-        for name in ('α', 'Alpha', 'alpha', 'Void fraction', 'Void Fraction', 'void fraction'):
-            if name in col_mapping:
-                alpha_col_key = name
-                break
-        if alpha_col_key is None:
-            # Tentar por similaridade (strip e case)
-            for col in available_cols:
-                if col is None or pd.isna(col):
-                    continue
-                c = str(col).strip().lower()
-                if c in ('α', 'alpha', 'void fraction') or c.replace(' ', '') == 'voidfraction':
-                    alpha_col_key = str(col).strip()
-                    col_mapping['α'] = col  # passar a usar 'α' daqui pra frente
-                    break
-        if alpha_col_key is None:
-            missing_cols = ['α (ou Alpha / Void fraction)']
-        else:
-            if alpha_col_key != 'α':
-                col_mapping['α'] = col_mapping[alpha_col_key]
-            missing_cols = []
-            for req_col in ['jG', 'jL', 'Flow Pattern']:
-                if req_col not in col_mapping:
-                    missing_cols.append(req_col)
-
-        if missing_cols:
-            print(f"Colunas ausentes para plot jG vs α: {missing_cols}")
-            print(f"Colunas disponíveis: {list(col_mapping.keys())}")
+        col_mapping = build_column_mapping(df)
+        if not ensure_alpha_in_column_mapping(col_mapping, available_cols):
+            print('Colunas ausentes para plot jG vs α: α (ou Alpha / Void fraction)')
+            print(f'Colunas disponíveis: {list(col_mapping.keys())}')
+            return
+        miss = missing_column_keys(col_mapping, ['jG', 'jL', 'Flow Pattern'])
+        if miss:
+            print(f'Colunas ausentes para plot jG vs α: {miss}')
+            print(f'Colunas disponíveis: {list(col_mapping.keys())}')
             return
 
-        # Configurar estilo científico para LaTeX
         setup_plot_style()
-
-        # Criar figura
-        fig, ax = plt.subplots(figsize=(10, 10))  # Figura quadrada 10x10
+        fig, ax = plt.subplots(figsize=(10, 10))
 
         # Obter valores únicos de jL e agrupar por séries
         jl_col = col_mapping['jL']
@@ -819,69 +901,14 @@ def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         jl_series = [jl for jl in jl_series if pd.notna(jl)]
         
         print(f"Séries de jL encontradas: {jl_series}")
-        
-        # # Cores em escala de cinza (maior jL = mais escuro, menor jL = mais claro)
-        # # Gerar cores baseadas nos valores de jL
-        # gray_colors = []
-        # for jl in jl_series:
-        #     # Normalizar jL entre 0 e 1, onde 0 = mais claro, 1 = mais escuro
-        #     jl_min = min(jl_series)
-        #     jl_max = max(jl_series)
-        #     if jl_max > jl_min:
-        #         normalized_jl = (jl - jl_min) / (jl_max - jl_min)
-        #     else:
-        #         normalized_jl = 0.5  # Se todos os valores são iguais
-            
-        #     # Converter para escala de cinza (0.3 = cinza claro, 0.9 = cinza escuro)
-        #     # jL = 0.2 → cinza claro, jL = 1.8 → cinza escuro
-        #     gray_value = 0.6 * normalized_jl
-        #     gray_color = f'#{int(gray_value * 255):02x}{int(gray_value * 255):02x}{int(gray_value * 255):02x}'
-        #     gray_colors.append(gray_color)
-        
-        # colors = gray_colors[::-1]
-        
-        #Lista de cores
-        colors = ['red', 'blue', 'orange', 'yellow', 'silver', 'white']
+
         line_styles, symbol_line = get_series_line_and_marker_styles()
-        # Símbolos para Flow Patterns (expandido para todos os padrões encontrados)
-        # flow_pattern_symbols = {
-        #     'Elongated Bubble': 'o',      # Círculo
-        #     'Slug': 's',                  # Quadrado
-        #     'slug': 's',                  # Quadrado (minúsculo)
-        #     'sw': '^',                    # Triângulo para cima
-        #     'SW': '^',                    # Triângulo para cima
-        #     'SS': 'v',                    # Triângulo para baixo
-        #     'Estratificado': 'D',         # Diamante
-        #     'SW/MI': 'p',                 # Pentágono
-        #     'Intermittent (Slug Wavy)²': 'h',  # Hexágono
-        #     'Intermittent (Slug Wavy) ²': 'h', # Hexágono
-        #     'Intermittent (Slug Wavy)¹ ²': 'H', # Hexágono grande
-        #     'Rolling Wave²': '8',         # Octágono
-        #     'DBubbly': 'P',               # Plus
-        #     'A': 'X',                     # X
-        #     'B': 'd',                     # Diamante pequeno
-        #     'EB-A (I)': 'o',              # Círculo
-        #     'EB-A  (I)': 'o',             # Círculo
-        #     'EB-B (I)': 'o',              # Círculo
-        #     'B-SL (I)': 's',              # Quadrado
-        #     'SL (I)': 's',                # Quadrado
-        #     'annular': 'o',               # Círculo
-        #     'churn': 's',                 # Quadrado
-        #     'Churn': 's',                 # Quadrado
-        #     'Churn/bolhas?': 's',         # Quadrado
-        #     'Churn?': 's',                # Quadrado
-        #     'bubbles': 'o',               # Círculo
-        #     'Intermittent¹ ²': 'h'         # Hexágono
-        # }
-        
         flow_pattern_symbols = get_flow_pattern_symbols()
         vec_s_lines = []
 
-        # Plotar cada série de jL
         for i, jl in enumerate(jl_series):
-            # Filtrar dados para esta série de jL
             mask = df_plot['jL_rounded'] == jl
-            
+
             jg_data = _one_col_series_masked(df_plot, mask, jg_col)
             alpha_data = _one_col_series_masked(df_plot, mask, alpha_col)
             flow_pattern_data = _one_col_series_masked(df_plot, mask, flow_pattern_col)
@@ -892,23 +919,26 @@ def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
             alpha_clean = alpha_data[valid_mask]
             flow_pattern_clean = flow_pattern_data[valid_mask]
             if len(jg_clean) > 0:
-                color = colors[i % len(colors)]
-                line_style = line_styles[i % len(line_styles)] # Escolher estilo de linha
+                line_style = line_styles[i % len(line_styles)]
                 s_lines = symbol_line[i % len(symbol_line)]
                 vec_s_lines.append(s_lines)
-                # Ordenar dados por jG para conectar corretamente
                 sorted_data = sorted(zip(jg_clean, alpha_clean, flow_pattern_clean))
                 jg_sorted = [x[0] for x in sorted_data]
                 alpha_sorted = [x[1] for x in sorted_data]
                 flow_pattern_sorted = [x[2] for x in sorted_data]
-                
-                
-                    
-                # Plotar linha conectando os pontos (todas pretas, estilo varia por série)
-                ax.plot(jg_sorted, alpha_sorted, line_style, marker=s_lines, markersize=20, color='black', mfc='silver', linewidth=1.5, zorder=1)
-                # ax.plot(jg_sorted, alpha_sorted, line_style, marker=s_lines, markersize=16, color='black', mfc='silver', linewidth=1.5, zorder=1)
 
-                # Plotar cada ponto com símbolo baseado no Flow Pattern
+                ax.plot(
+                    jg_sorted,
+                    alpha_sorted,
+                    line_style,
+                    marker=s_lines,
+                    markersize=20,
+                    color='black',
+                    mfc='silver',
+                    linewidth=1.5,
+                    zorder=1,
+                )
+
                 for j, (jg_val, alpha_val, flow_pattern) in enumerate(zip(jg_sorted, alpha_sorted, flow_pattern_sorted)):
                     pattern_data = flow_pattern_symbols.get(flow_pattern, {'symbol': 'o', 'color': 'gray'})
                     symbol = pattern_data['symbol']
@@ -919,24 +949,11 @@ def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
                 
                 
                 print(f"Plotando série jL = {jl:.1f} m/s com {len(jg_clean)} pontos")
-        
-        # Adicionar legenda para Flow Patterns (apenas os que aparecem nos dados)
-        used_patterns = set()
-        for pattern in _one_col_series(df_plot, flow_pattern_col).dropna().unique():
-            if pattern in flow_pattern_symbols:
-                used_patterns.add(pattern)
-        print('used_patterns',used_patterns)
-        legend_elements = []
-        for pattern in sorted(used_patterns):
-            pattern_data = flow_pattern_symbols.get(pattern, {'symbol': 'o', 'color': 'gray'})
-            symbol = pattern_data['symbol']
-            color = pattern_data['color']
-            print(symbol, color)
-            legend_elements.append(plt.Line2D([0], [0], marker=symbol, color='w', 
-                                            markerfacecolor=color, markersize=8, 
-                                            markeredgecolor='black', markeredgewidth=1,
-                                            label=pattern))
-        
+
+        legend_elements = flow_pattern_legend_handles(
+            df_plot, flow_pattern_col, flow_pattern_symbols
+        )
+
         x_label = r'$j_{g} [m/s]$'
         y_label = r'Void fraction ($\alpha_g$)'
         # Configurar eixos com fonte acadêmica
@@ -966,15 +983,22 @@ def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         for label in ax.get_xticklabels() + ax.get_yticklabels():
             label.set_fontfamily('serif')
         apply_subtle_gray_grid(ax)
-        
-        # Adicionar legenda para jL
+
         jl_legend_elements = []
         for i, jl in enumerate(jl_series):
-            color = colors[i % len(colors)]
-            print(i)
             line_style = line_styles[i % len(line_styles)]
-            jl_legend_elements.append(plt.Line2D([0], [0], color='black', linestyle=line_style, marker=vec_s_lines[i], mfc='silver',
-                                               markersize=12, label=rf'$j_{{l}}$ = {jl:.1f} m/s'))
+            jl_legend_elements.append(
+                plt.Line2D(
+                    [0],
+                    [0],
+                    color='black',
+                    linestyle=line_style,
+                    marker=vec_s_lines[i],
+                    mfc='silver',
+                    markersize=12,
+                    label=rf'$j_{{l}}$ = {jl:.1f} m/s',
+                )
+            )
         ax.legend(
             handles=jl_legend_elements + legend_elements,
             ncol=LEGEND_TOP_NCOL,
@@ -991,30 +1015,9 @@ def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
             va='bottom',
         )
 
-        # Ajustar layout
         plt.tight_layout()
-        
-        # Salvar figura no diretório do file_path/SheetName
-        output_dir = os.path.dirname(file_path)
-        sheet_dir = os.path.join(output_dir, sheet_name)
-        os.makedirs(sheet_dir, exist_ok=True)
-        base_name = f"{sheet_name}_alpha_vs_jg"
-        pdf_file = os.path.join(sheet_dir, f"{base_name}.pdf")
-        png_file = os.path.join(sheet_dir, f"{base_name}.png")
+        save_figure_to_sheet_dir(f'{sheet_name}_alpha_vs_jg', sheet_name)
 
-        # Salvar em PDF (ideal para LaTeX)
-        plt.savefig(pdf_file, format='pdf', dpi=300, bbox_inches='tight', 
-                   pad_inches=0.1, facecolor='white', edgecolor='none')
-        print(f"Plot PDF salvo: {pdf_file}")
-        
-        # Salvar também em PNG (para visualização)
-        plt.savefig(png_file, format='png', dpi=300, bbox_inches='tight', 
-                   pad_inches=0.1, facecolor='white', edgecolor='none')
-        print(f"Plot PNG salvo: {png_file}")
-        
-        # Mostrar figura
-        # plt.show()
-        
     except Exception as e:
         print(f"Erro ao gerar plot: {e}")
         import traceback
@@ -1030,35 +1033,16 @@ def generate_dpdzf_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         sheet_name (str): Nome da aba/sheet
     """
     try:
-        # Verificar se as colunas necessárias existem (com possíveis espaços)
-        required_cols = ['jG', 'jL', 'dp/dz_F', 'Flow Pattern']
-        available_cols = list(df.columns)
-        
-        # Mapear nomes de colunas (removendo espaços extras)
-        col_mapping = {}
-        for col in available_cols:
-            if pd.notna(col):
-                clean_col = str(col).strip()
-                col_mapping[clean_col] = col
-        
-        # Verificar se as colunas necessárias estão disponíveis
-        missing_cols = []
-        for req_col in required_cols:
-            if req_col not in col_mapping:
-                missing_cols.append(req_col)
-        
-        if missing_cols:
-            print(f"Colunas ausentes para plot: {missing_cols}")
-            print(f"Colunas disponíveis: {list(col_mapping.keys())}")
+        col_mapping = build_column_mapping(df)
+        miss = missing_column_keys(col_mapping, ['jG', 'jL', 'dp/dz_F', 'Flow Pattern'])
+        if miss:
+            print(f'Colunas ausentes para plot: {miss}')
+            print(f'Colunas disponíveis: {list(col_mapping.keys())}')
             return
-        
-        # Configurar estilo científico para LaTeX
+
         setup_plot_style()
-        
-        # Criar figura
-        fig, ax = plt.subplots(figsize=(10, 10))  # Figura quadrada 10x10
-        
-        # Obter valores únicos de jL e agrupar por séries
+        fig, ax = plt.subplots(figsize=(10, 10))
+
         jl_col = col_mapping['jL']
         jg_col = col_mapping['jG']
         dp_dz_f_col = col_mapping['dp/dz_F']
@@ -1073,69 +1057,14 @@ def generate_dpdzf_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         jl_series = [jl for jl in jl_series if pd.notna(jl)]
         
         print(f"Séries de jL encontradas: {jl_series}")
-        
-        # # Cores em escala de cinza (maior jL = mais escuro, menor jL = mais claro)
-        # # Gerar cores baseadas nos valores de jL
-        # gray_colors = []
-        # for jl in jl_series:
-        #     # Normalizar jL entre 0 e 1, onde 0 = mais claro, 1 = mais escuro
-        #     jl_min = min(jl_series)
-        #     jl_max = max(jl_series)
-        #     if jl_max > jl_min:
-        #         normalized_jl = (jl - jl_min) / (jl_max - jl_min)
-        #     else:
-        #         normalized_jl = 0.5  # Se todos os valores são iguais
-            
-        #     # Converter para escala de cinza (0.3 = cinza claro, 0.9 = cinza escuro)
-        #     # jL = 0.2 → cinza claro, jL = 1.8 → cinza escuro
-        #     gray_value = 0.6 * normalized_jl
-        #     gray_color = f'#{int(gray_value * 255):02x}{int(gray_value * 255):02x}{int(gray_value * 255):02x}'
-        #     gray_colors.append(gray_color)
-        
-        # colors = gray_colors[::-1]
-        
-        #Lista de cores
-        colors = ['red', 'blue', 'orange', 'yellow', 'silver', 'white']
+
         line_styles, symbol_line = get_series_line_and_marker_styles()
-        # Símbolos para Flow Patterns (expandido para todos os padrões encontrados)
-        # flow_pattern_symbols = {
-        #     'Elongated Bubble': 'o',      # Círculo
-        #     'Slug': 's',                  # Quadrado
-        #     'slug': 's',                  # Quadrado (minúsculo)
-        #     'sw': '^',                    # Triângulo para cima
-        #     'SW': '^',                    # Triângulo para cima
-        #     'SS': 'v',                    # Triângulo para baixo
-        #     'Estratificado': 'D',         # Diamante
-        #     'SW/MI': 'p',                 # Pentágono
-        #     'Intermittent (Slug Wavy)²': 'h',  # Hexágono
-        #     'Intermittent (Slug Wavy) ²': 'h', # Hexágono
-        #     'Intermittent (Slug Wavy)¹ ²': 'H', # Hexágono grande
-        #     'Rolling Wave²': '8',         # Octágono
-        #     'DBubbly': 'P',               # Plus
-        #     'A': 'X',                     # X
-        #     'B': 'd',                     # Diamante pequeno
-        #     'EB-A (I)': 'o',              # Círculo
-        #     'EB-A  (I)': 'o',             # Círculo
-        #     'EB-B (I)': 'o',              # Círculo
-        #     'B-SL (I)': 's',              # Quadrado
-        #     'SL (I)': 's',                # Quadrado
-        #     'annular': 'o',               # Círculo
-        #     'churn': 's',                 # Quadrado
-        #     'Churn': 's',                 # Quadrado
-        #     'Churn/bolhas?': 's',         # Quadrado
-        #     'Churn?': 's',                # Quadrado
-        #     'bubbles': 'o',               # Círculo
-        #     'Intermittent¹ ²': 'h'         # Hexágono
-        # }
-        
         flow_pattern_symbols = get_flow_pattern_symbols()
         vec_s_lines = []
 
-        # Plotar cada série de jL
         for i, jl in enumerate(jl_series):
-            # Filtrar dados para esta série de jL
             mask = df_plot['jL_rounded'] == jl
-            
+
             jg_data = _one_col_series_masked(df_plot, mask, jg_col)
             frictional_data = _one_col_series_masked(df_plot, mask, dp_dz_f_col)
             flow_pattern_data = _one_col_series_masked(df_plot, mask, flow_pattern_col)
@@ -1146,51 +1075,49 @@ def generate_dpdzf_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
             frictional_clean = frictional_data[valid_mask]/1000     #To plot in kPa
             flow_pattern_clean = flow_pattern_data[valid_mask]
             if len(jg_clean) > 0:
-                color = colors[i % len(colors)]
-                line_style = line_styles[i % len(line_styles)] # Escolher estilo de linha
+                line_style = line_styles[i % len(line_styles)]
                 s_lines = symbol_line[i % len(symbol_line)]
                 vec_s_lines.append(s_lines)
-                # Ordenar dados por jG para conectar corretamente
                 sorted_data = sorted(zip(jg_clean, frictional_clean, flow_pattern_clean))
                 jg_sorted = [x[0] for x in sorted_data]
                 frictional_sorted = [x[1] for x in sorted_data]
                 flow_pattern_sorted = [x[2] for x in sorted_data]
-                
-                
-                    
-                # Plotar linha conectando os pontos (todas pretas, estilo varia por série)
-                ax.plot(jg_sorted, frictional_sorted, line_style, marker=s_lines, markersize=20, color='black', mfc='silver', linewidth=1.5, zorder=1)
-                # ax.plot(jg_sorted, frictional_sorted, line_style, marker=s_lines, markersize=16, color='black', mfc='silver', linewidth=1.5, zorder=1)
 
-                # Plotar cada ponto com símbolo baseado no Flow Pattern
-                for j, (jg_val, frictional_val, flow_pattern) in enumerate(zip(jg_sorted, frictional_sorted, flow_pattern_sorted)):
+                ax.plot(
+                    jg_sorted,
+                    frictional_sorted,
+                    line_style,
+                    marker=s_lines,
+                    markersize=20,
+                    color='black',
+                    mfc='silver',
+                    linewidth=1.5,
+                    zorder=1,
+                )
+
+                for j, (jg_val, frictional_val, flow_pattern) in enumerate(
+                    zip(jg_sorted, frictional_sorted, flow_pattern_sorted)
+                ):
                     pattern_data = flow_pattern_symbols.get(flow_pattern, {'symbol': 'o', 'color': 'gray'})
                     symbol = pattern_data['symbol']
                     color = pattern_data['color']
-                    ax.scatter(jg_val, frictional_val, c=color, marker=symbol, s=100, 
-                             edgecolors='black', linewidth=1, zorder=2)
-                    
-                
-                
+                    ax.scatter(
+                        jg_val,
+                        frictional_val,
+                        c=color,
+                        marker=symbol,
+                        s=100,
+                        edgecolors='black',
+                        linewidth=1,
+                        zorder=2,
+                    )
+
                 print(f"Plotando série jL = {jl:.1f} m/s com {len(jg_clean)} pontos")
-        
-        # Adicionar legenda para Flow Patterns (apenas os que aparecem nos dados)
-        used_patterns = set()
-        for pattern in _one_col_series(df_plot, flow_pattern_col).dropna().unique():
-            if pattern in flow_pattern_symbols:
-                used_patterns.add(pattern)
-        print('used_patterns',used_patterns)
-        legend_elements = []
-        for pattern in sorted(used_patterns):
-            pattern_data = flow_pattern_symbols.get(pattern, {'symbol': 'o', 'color': 'gray'})
-            symbol = pattern_data['symbol']
-            color = pattern_data['color']
-            print(symbol, color)
-            legend_elements.append(plt.Line2D([0], [0], marker=symbol, color='w', 
-                                            markerfacecolor=color, markersize=8, 
-                                            markeredgecolor='black', markeredgewidth=1,
-                                            label=pattern))
-        
+
+        legend_elements = flow_pattern_legend_handles(
+            df_plot, flow_pattern_col, flow_pattern_symbols
+        )
+
         x_label = r'$j_{g} [m/s]$'
         y_label = r'$\frac{\partial P}{\partial z} \text{f} \; \left[\frac{\text{kPa}}{\text{m}}\right]$'
 
@@ -1221,20 +1148,23 @@ def generate_dpdzf_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         for label in ax.get_xticklabels() + ax.get_yticklabels():
             label.set_fontfamily('serif')
         apply_subtle_gray_grid(ax)
-        
-        # Adicionar legenda para jL
+
         jl_legend_elements = []
         for i, jl in enumerate(jl_series):
-            color = colors[i % len(colors)]
-            print(i)
             line_style = line_styles[i % len(line_styles)]
-            jl_legend_elements.append(plt.Line2D([0], [0], color='black', linestyle=line_style, marker=vec_s_lines[i], mfc='silver',
-                                               markersize=12, label=rf'$j_{{l}}$ = {jl:.1f} m/s'))
-        # Criar duas legendas
-        # ax.legend(handles=jl_legend_elements + legend_elements, 
-        #          loc='lower right', frameon=True, fancybox=True, shadow=True, fontsize=22,
-        #          prop={'family': 'serif'})
-        
+            jl_legend_elements.append(
+                plt.Line2D(
+                    [0],
+                    [0],
+                    color='black',
+                    linestyle=line_style,
+                    marker=vec_s_lines[i],
+                    mfc='silver',
+                    markersize=12,
+                    label=rf'$j_{{l}}$ = {jl:.1f} m/s',
+                )
+            )
+
         ax.legend(
             handles=jl_legend_elements + legend_elements,
             ncol=LEGEND_TOP_NCOL,
@@ -1250,27 +1180,9 @@ def generate_dpdzf_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
             verticalalignment='top',
         )
 
-        # Ajustar layout
         plt.tight_layout()
-        
-        # Salvar figura no diretório do file_path/SheetName
-        output_dir = os.path.dirname(file_path)
-        sheet_dir = os.path.join(output_dir, sheet_name)
-        os.makedirs(sheet_dir, exist_ok=True)
-        base_name = f"{sheet_name}_frictional_vs_jg"
-        pdf_file = os.path.join(sheet_dir, f"{base_name}.pdf")
-        png_file = os.path.join(sheet_dir, f"{base_name}.png")
-        
-        # Salvar em PDF (ideal para LaTeX)
-        plt.savefig(pdf_file, format='pdf', dpi=300, bbox_inches='tight', 
-                   pad_inches=0.1, facecolor='white', edgecolor='none')
-        print(f"Plot PDF salvo: {pdf_file}")
-        
-        # Salvar também em PNG (para visualização)
-        plt.savefig(png_file, format='png', dpi=300, bbox_inches='tight', 
-                   pad_inches=0.1, facecolor='white', edgecolor='none')
-        print(f"Plot PNG salvo: {png_file}")
-        
+        save_figure_to_sheet_dir(f'{sheet_name}_frictional_vs_jg', sheet_name)
+
     except Exception as e:
         print(f"Erro ao gerar plot: {e}")
         import traceback
@@ -1283,66 +1195,32 @@ def generate_alpha_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
     uma série por Re_sl (agrupado), símbolos por Flow Pattern, eixo X em escala log.
     """
     try:
-        required_base = ['jG', 'jL', 'Flow Pattern', 'Temp.', 'Gauge Pressure']
         available_cols = list(df.columns)
-
-        col_mapping = {}
-        for col in available_cols:
-            if pd.notna(col):
-                clean_col = str(col).strip()
-                col_mapping[clean_col] = col
-
-        alpha_col_key = None
-        for name in ('α', 'Alpha', 'alpha', 'Void fraction', 'Void Fraction', 'void fraction'):
-            if name in col_mapping:
-                alpha_col_key = name
-                break
-        if alpha_col_key is None:
-            for col in available_cols:
-                if col is None or pd.isna(col):
-                    continue
-                c = str(col).strip().lower()
-                if c in ('α', 'alpha', 'void fraction') or c.replace(' ', '') == 'voidfraction':
-                    alpha_col_key = str(col).strip()
-                    col_mapping['α'] = col
-                    break
-        if alpha_col_key is None:
-            print("Colunas ausentes para plot Re_sg vs α: α (ou Alpha / Void fraction)")
-            print(f"Colunas disponíveis: {list(col_mapping.keys())}")
+        col_mapping = build_column_mapping(df)
+        if not ensure_alpha_in_column_mapping(col_mapping, available_cols):
+            print('Colunas ausentes para plot Re_sg vs α: α (ou Alpha / Void fraction)')
+            print(f'Colunas disponíveis: {list(col_mapping.keys())}')
             return
-        if alpha_col_key != 'α':
-            col_mapping['α'] = col_mapping[alpha_col_key]
-
-        missing_cols = [c for c in required_base if c not in col_mapping]
-        if missing_cols:
-            print(f"Colunas ausentes para plot Re_sg vs α: {missing_cols}")
-            print(f"Colunas disponíveis: {list(col_mapping.keys())}")
+        miss = missing_column_keys(
+            col_mapping,
+            ['jG', 'jL', 'Flow Pattern', 'Temp.', 'Gauge Pressure'],
+        )
+        if miss:
+            print(f'Colunas ausentes para plot Re_sg vs α: {miss}')
+            print(f'Colunas disponíveis: {list(col_mapping.keys())}')
             return
 
         setup_plot_style()
         fig, ax = plt.subplots(figsize=(10, 10))
 
-        jl_col = col_mapping['jL']
-        jg_col = col_mapping['jG']
         alpha_col = col_mapping['α']
         flow_pattern_col = col_mapping['Flow Pattern']
-        D = 0.05251
-        P_col = col_mapping['Gauge Pressure']
-        P_Pa = pd.to_numeric(_one_col_series(df, P_col), errors='coerce') + 101325
-        T_col = col_mapping['Temp.']
-        T_K = pd.to_numeric(_one_col_series(df, T_col), errors='coerce') + 273
-        rho_G = [PropsSI('D', 'P', p, 'T', t, fluid_1) for p, t in zip(P_Pa, T_K)]
-        mu_G = [PropsSI('V', 'P', p, 'T', t, fluid_1) for p, t in zip(P_Pa, T_K)]
-
-        jg_vals = pd.to_numeric(_one_col_series(df, jg_col), errors='coerce')
-        Re_sg = pd.Series(np.array(rho_G) * jg_vals.values * D / np.array(mu_G), index=df.index)
-        df['Re_sg'] = Re_sg
+        compute_Re_sg_column(df, col_mapping, fluid_1)
 
         df_plot = df.copy().reset_index(drop=True)
         _assign_numeric_to_first_named_column(
             df_plot, alpha_col, _one_col_series(df_plot, alpha_col)
         )
-        df_plot['jL_rounded'] = _one_col_series(df_plot, jl_col).round(1)
 
         if 'Re_sl_group' not in df.columns:
             standardize_liquid_conditions({sheet_name: df})
@@ -1419,63 +1297,15 @@ def generate_alpha_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
 
                 print(f"Plotando α vs Re_sg, série Re_sl = {re_l:.1f} com {len(Re_sg_clean)} pontos")
 
-        used_patterns = set()
-        for pattern in _one_col_series(df_plot, flow_pattern_col).dropna().unique():
-            if pattern in flow_pattern_symbols:
-                used_patterns.add(pattern)
-
-        legend_elements = []
-        for pattern in sorted(used_patterns):
-            pattern_data = flow_pattern_symbols.get(pattern, {'symbol': 'x', 'color': 'gray'})
-            symbol = pattern_data['symbol']
-            p_color = pattern_data['color']
-            legend_elements.append(
-                plt.Line2D(
-                    [0],
-                    [0],
-                    marker=symbol,
-                    color='w',
-                    markerfacecolor=p_color,
-                    markersize=8,
-                    markeredgecolor='black',
-                    markeredgewidth=1,
-                    label=pattern,
-                )
-            )
+        legend_elements = flow_pattern_legend_handles(
+            df_plot, flow_pattern_col, flow_pattern_symbols
+        )
 
         ax.set_xlabel(r'$Re_{sg}$', fontsize=24, fontfamily='serif')
         ax.set_ylabel(r'Void fraction ($\alpha_g$)', fontsize=24, fontfamily='serif')
+        style_axes_re_g_log_x(ax, y_major_step=0.1, y_bottom=0, y_top=1.0)
 
-        ax.set_axisbelow(True)
-        ax.minorticks_on()
-        ax.yaxis.set_major_locator(MultipleLocator(0.1))
-
-        ax.set_xlim(left=1000, right=250000)
-        ax.set_ylim(bottom=0, top=1)
-        ax.set_xscale('log')
-
-        ax.tick_params(axis='both', which='major', labelsize=18, size=8)
-        ax.tick_params(axis='both', which='minor', labelsize=18, size=6)
-
-        for label in ax.get_xticklabels() + ax.get_yticklabels():
-            label.set_fontfamily('serif')
-        apply_subtle_gray_grid(ax)
-
-        Re_sl_legend_elements = []
-        for re_l, line_style, s_lines in legend_series_meta:
-            series_label = rf'$Re_{{sl}}$ = {int(re_l)}'
-            Re_sl_legend_elements.append(
-                plt.Line2D(
-                    [0],
-                    [0],
-                    color='black',
-                    linestyle=line_style,
-                    marker=s_lines,
-                    mfc='silver',
-                    markersize=12,
-                    label=series_label,
-                )
-            )
+        Re_sl_legend_elements = re_sl_legend_handles_from_meta(legend_series_meta)
 
         combined_leg = Re_sl_legend_elements + legend_elements
         if combined_leg:
@@ -1496,35 +1326,7 @@ def generate_alpha_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         )
 
         plt.tight_layout()
-
-        output_dir = os.path.dirname(file_path)
-        sheet_dir = os.path.join(output_dir, sheet_name)
-        os.makedirs(sheet_dir, exist_ok=True)
-        base_name = f"{sheet_name}_alpha_vs_Re_g"
-        pdf_file = os.path.join(sheet_dir, f"{base_name}.pdf")
-        png_file = os.path.join(sheet_dir, f"{base_name}.png")
-
-        plt.savefig(
-            pdf_file,
-            format='pdf',
-            dpi=300,
-            bbox_inches='tight',
-            pad_inches=0.1,
-            facecolor='white',
-            edgecolor='none',
-        )
-        print(f"Plot PDF salvo: {pdf_file}")
-
-        plt.savefig(
-            png_file,
-            format='png',
-            dpi=300,
-            bbox_inches='tight',
-            pad_inches=0.1,
-            facecolor='white',
-            edgecolor='none',
-        )
-        print(f"Plot PNG salvo: {png_file}")
+        save_figure_to_sheet_dir(f'{sheet_name}_alpha_vs_Re_g', sheet_name)
 
     except Exception as e:
         print(f"Erro ao gerar plot α vs Re_sg: {e}")
@@ -1538,45 +1340,21 @@ def generate_dpdzf_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
     Inclui símbolos diferentes para cada Flow Pattern.
     """
     try:
-        required_cols = ['jG', 'jL', 'dp/dz_F', 'Flow Pattern', 'Temp.', 'Gauge Pressure']
-        available_cols = list(df.columns)
-        
-        col_mapping = {}
-        for col in available_cols:
-            if pd.notna(col):
-                clean_col = str(col).strip()
-                col_mapping[clean_col] = col
-        
-        missing_cols = []
-        for req_col in required_cols:
-            if req_col not in col_mapping:
-                missing_cols.append(req_col)
-        
-        if missing_cols:
-            print(f"Colunas ausentes para plot: {missing_cols}")
-            print(f"Colunas disponíveis: {list(col_mapping.keys())}")
+        col_mapping = build_column_mapping(df)
+        miss = missing_column_keys(
+            col_mapping,
+            ['jG', 'jL', 'dp/dz_F', 'Flow Pattern', 'Temp.', 'Gauge Pressure'],
+        )
+        if miss:
+            print(f'Colunas ausentes para plot: {miss}')
+            print(f'Colunas disponíveis: {list(col_mapping.keys())}')
             return
-        
+
         setup_plot_style()
-        
-        # Figura quadrada 10×10; legenda no topo (como frictional_vs_jg)
         fig, ax = plt.subplots(figsize=(10, 10))
-        
+
         jl_col = col_mapping['jL']
-        jg_col = col_mapping['jG']
-        D = 0.05251
-        P_col = col_mapping['Gauge Pressure']
-        P_Pa = pd.to_numeric(_one_col_series(df, P_col), errors='coerce') + 101325
-        T_col = col_mapping['Temp.']
-        T_K = pd.to_numeric(_one_col_series(df, T_col), errors='coerce') + 273
-        # Propriedades do gás (Re_sg) de acordo com fluid_1 (Air, SF6, etc.)
-        rho_G = [PropsSI('D', 'P', p, 'T', t, fluid_1) for p, t in zip(P_Pa, T_K)]
-        mu_G = [PropsSI('V', 'P', p, 'T', t, fluid_1) for p, t in zip(P_Pa, T_K)]
-        
-        jg_vals = pd.to_numeric(_one_col_series(df, jg_col), errors='coerce')
-        Re_sg = pd.Series(np.array(rho_G) * jg_vals.values * D / np.array(mu_G), index=df.index)
-        # Guardar Re_sg no DataFrame original para uso/visualização posterior
-        df['Re_sg'] = Re_sg
+        compute_Re_sg_column(df, col_mapping, fluid_1)
 
         dp_dz_f_col = col_mapping['dp/dz_F']
         flow_pattern_col = col_mapping['Flow Pattern']
@@ -1603,117 +1381,82 @@ def generate_dpdzf_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         
         print(f"Séries de jL encontradas: {jl_series}")
         print(f"Séries de Re_sl (padronizado) encontradas: {Re_sl_series}")
-        
-        colors = ['red', 'blue', 'orange', 'yellow', 'silver', 'white']
+
         line_styles, symbol_line = get_series_line_and_marker_styles()
-
         flow_pattern_symbols = get_flow_pattern_symbols()
-        vec_s_lines = []
-        
-        # Inicializar variáveis para uso fora do loop
-        frictional_sorted = []
-        Re_sg_sorted = []
+        legend_series_meta = []
 
-        # Plotar cada série de Re_sl (agrupado em blocos de 4 pontos)
         for i, re_l in enumerate(Re_sl_series):
-            # Filtrar dados para esta série de Re_sl
             mask = df_plot['Re_sl_group'] == re_l
-            
-            jg_data = _one_col_series_masked(df_plot, mask, jg_col)
+
             frictional_data = _one_col_series_masked(df_plot, mask, dp_dz_f_col)
             flow_pattern_data = _one_col_series_masked(df_plot, mask, flow_pattern_col)
-            
-            # Remover valores nulos
             Re_sg_masked = Re_sg_plot[mask]
-            valid_mask = pd.notna(Re_sg_masked) & pd.notna(frictional_data) & pd.notna(flow_pattern_data)
+            valid_mask = (
+                pd.notna(Re_sg_masked)
+                & pd.notna(frictional_data)
+                & pd.notna(flow_pattern_data)
+            )
             Re_sg_clean = Re_sg_masked[valid_mask]
-            frictional_clean = frictional_data[valid_mask]/1000
+            frictional_clean = frictional_data[valid_mask] / 1000
             flow_pattern_clean = flow_pattern_data[valid_mask]
-            
+
             if len(Re_sg_clean) > 0:
-                color = colors[i % len(colors)]
                 line_style = line_styles[i % len(line_styles)]
                 s_lines = symbol_line[i % len(symbol_line)]
-                vec_s_lines.append(s_lines)
-                
+                legend_series_meta.append((re_l, line_style, s_lines))
+
                 sorted_data = sorted(zip(Re_sg_clean, frictional_clean, flow_pattern_clean))
                 Re_sg_sorted = [x[0] for x in sorted_data]
                 frictional_sorted = [x[1] for x in sorted_data]
                 flow_pattern_sorted = [x[2] for x in sorted_data]
-                
-                ax.plot(Re_sg_sorted, frictional_sorted, line_style, marker=s_lines, markersize=20, 
-                       color='black', mfc='silver', linewidth=1.5, zorder=1)
 
-                for j, (Re_sg_val, frictional_val, flow_pattern) in enumerate(zip(Re_sg_sorted, frictional_sorted, flow_pattern_sorted)):
-                    pattern_data = flow_pattern_symbols.get(flow_pattern, {'symbol': 'o', 'color': 'gray'})
+                ax.plot(
+                    Re_sg_sorted,
+                    frictional_sorted,
+                    line_style,
+                    marker=s_lines,
+                    markersize=20,
+                    color='black',
+                    mfc='silver',
+                    linewidth=1.5,
+                    zorder=1,
+                )
+
+                for Re_sg_val, frictional_val, flow_pattern in zip(
+                    Re_sg_sorted, frictional_sorted, flow_pattern_sorted
+                ):
+                    pattern_data = flow_pattern_symbols.get(
+                        flow_pattern, {'symbol': 'o', 'color': 'gray'}
+                    )
                     symbol = pattern_data['symbol']
                     color = pattern_data['color']
-                    ax.scatter(Re_sg_val, frictional_val, c=color, marker=symbol, s=100, 
-                             edgecolors='black', linewidth=1, zorder=2)
-                
+                    ax.scatter(
+                        Re_sg_val,
+                        frictional_val,
+                        c=color,
+                        marker=symbol,
+                        s=100,
+                        edgecolors='black',
+                        linewidth=1,
+                        zorder=2,
+                    )
+
                 print(f"Plotando série Re_sl = {re_l:.1f} com {len(Re_sg_clean)} pontos")
-        
-        used_patterns = set()
-        for pattern in _one_col_series(df_plot, flow_pattern_col).dropna().unique():
-            if pattern in flow_pattern_symbols:
-                used_patterns.add(pattern)
-        
-        legend_elements = []
-        for pattern in sorted(used_patterns):
-            pattern_data = flow_pattern_symbols.get(pattern, {'symbol': 'x', 'color': 'gray'})
-            symbol = pattern_data['symbol']
-            color = pattern_data['color']
-            print(symbol, color)
-            legend_elements.append(plt.Line2D([0], [0], marker=symbol, color='w', 
-                                            markerfacecolor=color, markersize=8, 
-                                            markeredgecolor='black', markeredgewidth=1,
-                                            label=pattern))
-        
-        x_label = r'$Re_{sg}$'
-        y_label = r'$\frac{\partial P}{\partial z} \text{f} \; \left[\frac{\text{kPa}}{\text{m}}\right]$'
 
-        ax.set_xlabel(x_label, fontsize=24, fontfamily='serif')
-        ax.set_ylabel(y_label, fontsize=24, fontfamily='serif')
-        
-        ax.set_axisbelow(True)
-        ax.minorticks_on()
-        
-        ax.xaxis.set_major_locator(MultipleLocator(1.0))
-        ax.yaxis.set_major_locator(MultipleLocator(0.5))
-        ax.xaxis.set_minor_locator(MultipleLocator(0.5))
-        
-        ax.set_xlim(left=1000, right=250000)
-        ax.set_ylim(bottom=0)
-        ax.set_xscale('log')
+        legend_elements = flow_pattern_legend_handles(
+            df_plot, flow_pattern_col, flow_pattern_symbols
+        )
 
-        ax.tick_params(axis='both', which='major', labelsize=18, size=8)
-        ax.tick_params(axis='both', which='minor', labelsize=18, size=6)
+        ax.set_xlabel(r'$Re_{sg}$', fontsize=24, fontfamily='serif')
+        ax.set_ylabel(
+            r'$\frac{\partial P}{\partial z} \text{f} \; \left[\frac{\text{kPa}}{\text{m}}\right]$',
+            fontsize=24,
+            fontfamily='serif',
+        )
+        style_axes_re_g_log_x(ax, y_major_step=0.5, y_bottom=0, y_top=None)
 
-        for label in ax.get_xticklabels() + ax.get_yticklabels():
-            label.set_fontfamily('serif')
-        apply_subtle_gray_grid(ax)
-        
-        # Adicionar legenda para Re_sl com Re_sg nominal (médio) por série
-        Re_sl_legend_elements = []
-        for i, re_l in enumerate(Re_sl_series):
-            line_style = line_styles[i % len(line_styles)]
-            # Re_sg nominal (médio) para esta série de Re_sl
-            mask_re = df_plot['Re_sl_group'] == re_l
-            series_label = rf'$Re_{{sl}}$ = {int(re_l)}'
-
-            Re_sl_legend_elements.append(
-                plt.Line2D(
-                    [0],
-                    [0],
-                    color='black',
-                    linestyle=line_style,
-                    marker=vec_s_lines[i],
-                    mfc='silver',
-                    markersize=12,
-                    label=series_label,
-                )
-            )
-        
+        Re_sl_legend_elements = re_sl_legend_handles_from_meta(legend_series_meta)
         ax.legend(
             handles=Re_sl_legend_elements + legend_elements,
             ncol=LEGEND_TOP_NCOL,
@@ -1730,22 +1473,8 @@ def generate_dpdzf_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         )
 
         plt.tight_layout()
+        save_figure_to_sheet_dir(f'{sheet_name}_frictional_vs_Re_g', sheet_name)
 
-        output_dir = os.path.dirname(file_path)
-        sheet_dir = os.path.join(output_dir, sheet_name)
-        os.makedirs(sheet_dir, exist_ok=True)
-        base_name = f"{sheet_name}_frictional_vs_Re_g"
-        pdf_file = os.path.join(sheet_dir, f"{base_name}.pdf")
-        png_file = os.path.join(sheet_dir, f"{base_name}.png")
-        
-        plt.savefig(pdf_file, format='pdf', dpi=300, bbox_inches='tight', 
-                   pad_inches=0.1, facecolor='white', edgecolor='none')
-        print(f"Plot PDF salvo: {pdf_file}")
-        
-        plt.savefig(png_file, format='png', dpi=300, bbox_inches='tight', 
-                   pad_inches=0.1, facecolor='white', edgecolor='none')
-        print(f"Plot PNG salvo: {png_file}")
-        
     except Exception as e:
         print(f"Erro ao gerar plot: {e}")
         import traceback
@@ -1757,43 +1486,21 @@ def generate_dpdzt_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
     Inclui símbolos diferentes para cada Flow Pattern.
     """
     try:
-        required_cols = ['jG', 'jL', 'dp/dz_T', 'Flow Pattern', 'Temp.', 'Gauge Pressure']
-        available_cols = list(df.columns)
-        
-        col_mapping = {}
-        for col in available_cols:
-            if pd.notna(col):
-                clean_col = str(col).strip()
-                col_mapping[clean_col] = col
-        
-        missing_cols = []
-        for req_col in required_cols:
-            if req_col not in col_mapping:
-                missing_cols.append(req_col)
-        
-        if missing_cols:
-            print(f"Colunas ausentes para plot: {missing_cols}")
-            print(f"Colunas disponíveis: {list(col_mapping.keys())}")
+        col_mapping = build_column_mapping(df)
+        miss = missing_column_keys(
+            col_mapping,
+            ['jG', 'jL', 'dp/dz_T', 'Flow Pattern', 'Temp.', 'Gauge Pressure'],
+        )
+        if miss:
+            print(f'Colunas ausentes para plot: {miss}')
+            print(f'Colunas disponíveis: {list(col_mapping.keys())}')
             return
-        
+
         setup_plot_style()
-        
         fig, ax = plt.subplots(figsize=(10, 10))
-        
+
         jl_col = col_mapping['jL']
-        jg_col = col_mapping['jG']
-        D = 0.05251
-        P_col = col_mapping['Gauge Pressure']
-        P_Pa = pd.to_numeric(_one_col_series(df, P_col), errors='coerce') + 101325
-        T_col = col_mapping['Temp.']
-        T_K = pd.to_numeric(_one_col_series(df, T_col), errors='coerce') + 273
-        rho_G = [PropsSI('D', 'P', p, 'T', t, fluid_1) for p, t in zip(P_Pa, T_K)]
-        mu_G = [PropsSI('V', 'P', p, 'T', t, fluid_1) for p, t in zip(P_Pa, T_K)]
-        
-        jg_vals = pd.to_numeric(_one_col_series(df, jg_col), errors='coerce')
-        Re_sg = pd.Series(np.array(rho_G) * jg_vals.values * D / np.array(mu_G), index=df.index)
-        # Guardar Re_sg no DataFrame original para uso/visualização posterior
-        df['Re_sg'] = Re_sg
+        compute_Re_sg_column(df, col_mapping, fluid_1)
 
         dp_dz_t_col = col_mapping['dp/dz_T']
         flow_pattern_col = col_mapping['Flow Pattern']
@@ -1820,117 +1527,82 @@ def generate_dpdzt_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         
         print(f"Séries de jL encontradas: {jl_series}")
         print(f"Séries de Re_sl (padronizado) encontradas: {Re_sl_series}")
-        
-        colors = ['red', 'blue', 'orange', 'yellow', 'silver', 'white']
+
         line_styles, symbol_line = get_series_line_and_marker_styles()
-
         flow_pattern_symbols = get_flow_pattern_symbols()
-        vec_s_lines = []
-        
-        # Inicializar variáveis para uso fora do loop
-        total_sorted = []
-        Re_sg_sorted = []
+        legend_series_meta = []
 
-        # Plotar cada série de Re_sl (agrupado em blocos de 4 pontos)
         for i, re_l in enumerate(Re_sl_series):
-            # Filtrar dados para esta série de Re_sl
             mask = df_plot['Re_sl_group'] == re_l
-            
-            jg_data = _one_col_series_masked(df_plot, mask, jg_col)
+
             total_data = _one_col_series_masked(df_plot, mask, dp_dz_t_col)
             flow_pattern_data = _one_col_series_masked(df_plot, mask, flow_pattern_col)
-            
-            # Remover valores nulos
             Re_sg_masked = Re_sg_plot[mask]
-            valid_mask = pd.notna(Re_sg_masked) & pd.notna(total_data) & pd.notna(flow_pattern_data)
+            valid_mask = (
+                pd.notna(Re_sg_masked)
+                & pd.notna(total_data)
+                & pd.notna(flow_pattern_data)
+            )
             Re_sg_clean = Re_sg_masked[valid_mask]
-            total_clean = total_data[valid_mask]/1000
+            total_clean = total_data[valid_mask] / 1000
             flow_pattern_clean = flow_pattern_data[valid_mask]
-            
+
             if len(Re_sg_clean) > 0:
-                color = colors[i % len(colors)]
                 line_style = line_styles[i % len(line_styles)]
                 s_lines = symbol_line[i % len(symbol_line)]
-                vec_s_lines.append(s_lines)
-                
+                legend_series_meta.append((re_l, line_style, s_lines))
+
                 sorted_data = sorted(zip(Re_sg_clean, total_clean, flow_pattern_clean))
                 Re_sg_sorted = [x[0] for x in sorted_data]
                 total_sorted = [x[1] for x in sorted_data]
                 flow_pattern_sorted = [x[2] for x in sorted_data]
-                
-                ax.plot(Re_sg_sorted, total_sorted, line_style, marker=s_lines, markersize=20, 
-                       color='black', mfc='silver', linewidth=1.5, zorder=1)
 
-                for j, (Re_sg_val, total_val, flow_pattern) in enumerate(zip(Re_sg_sorted, total_sorted, flow_pattern_sorted)):
-                    pattern_data = flow_pattern_symbols.get(flow_pattern, {'symbol': 'o', 'color': 'gray'})
+                ax.plot(
+                    Re_sg_sorted,
+                    total_sorted,
+                    line_style,
+                    marker=s_lines,
+                    markersize=20,
+                    color='black',
+                    mfc='silver',
+                    linewidth=1.5,
+                    zorder=1,
+                )
+
+                for Re_sg_val, total_val, flow_pattern in zip(
+                    Re_sg_sorted, total_sorted, flow_pattern_sorted
+                ):
+                    pattern_data = flow_pattern_symbols.get(
+                        flow_pattern, {'symbol': 'o', 'color': 'gray'}
+                    )
                     symbol = pattern_data['symbol']
                     color = pattern_data['color']
-                    ax.scatter(Re_sg_val, total_val, c=color, marker=symbol, s=100, 
-                             edgecolors='black', linewidth=1, zorder=2)
-                
+                    ax.scatter(
+                        Re_sg_val,
+                        total_val,
+                        c=color,
+                        marker=symbol,
+                        s=100,
+                        edgecolors='black',
+                        linewidth=1,
+                        zorder=2,
+                    )
+
                 print(f"Plotando série Re_sl = {re_l:.1f} com {len(Re_sg_clean)} pontos")
-        
-        used_patterns = set()
-        for pattern in _one_col_series(df_plot, flow_pattern_col).dropna().unique():
-            if pattern in flow_pattern_symbols:
-                used_patterns.add(pattern)
-        
-        legend_elements = []
-        for pattern in sorted(used_patterns):
-            pattern_data = flow_pattern_symbols.get(pattern, {'symbol': 'x', 'color': 'gray'})
-            symbol = pattern_data['symbol']
-            color = pattern_data['color']
-            print(symbol, color)
-            legend_elements.append(plt.Line2D([0], [0], marker=symbol, color='w', 
-                                            markerfacecolor=color, markersize=8, 
-                                            markeredgecolor='black', markeredgewidth=1,
-                                            label=pattern))
-        
-        x_label = r'$Re_{sg}$'
-        y_label = r'$\frac{\partial P}{\partial z} \text{t} \; \left[\frac{\text{kPa}}{\text{m}}\right]$'
 
-        ax.set_xlabel(x_label, fontsize=24, fontfamily='serif')
-        ax.set_ylabel(y_label, fontsize=24, fontfamily='serif')
-        
-        ax.set_axisbelow(True)
-        ax.minorticks_on()
-        
-        ax.xaxis.set_major_locator(MultipleLocator(1.0))
-        ax.yaxis.set_major_locator(MultipleLocator(0.5))
-        ax.xaxis.set_minor_locator(MultipleLocator(0.5))
-        
-        ax.set_xlim(left=1000, right=250000)
-        # ax.set_ylim(bottom=0)
-        ax.set_xscale('log')
+        legend_elements = flow_pattern_legend_handles(
+            df_plot, flow_pattern_col, flow_pattern_symbols
+        )
 
-        ax.tick_params(axis='both', which='major', labelsize=18, size=8)
-        ax.tick_params(axis='both', which='minor', labelsize=18, size=6)
+        ax.set_xlabel(r'$Re_{sg}$', fontsize=24, fontfamily='serif')
+        ax.set_ylabel(
+            r'$\frac{\partial P}{\partial z} \text{t} \; \left[\frac{\text{kPa}}{\text{m}}\right]$',
+            fontsize=24,
+            fontfamily='serif',
+        )
+        style_axes_re_g_log_x(ax, y_major_step=0.5, y_bottom=0, y_top=None)
 
-        for label in ax.get_xticklabels() + ax.get_yticklabels():
-            label.set_fontfamily('serif')
-        apply_subtle_gray_grid(ax)
-        
-        # Adicionar legenda para Re_sl com Re_sg nominal (médio) por série
-        Re_sl_legend_elements = []
-        for i, re_l in enumerate(Re_sl_series):
-            line_style = line_styles[i % len(line_styles)]
-            # Re_sg nominal (médio) para esta série de Re_sl
-            mask_re = df_plot['Re_sl_group'] == re_l
-            series_label = rf'$Re_{{sl}}$ = {int(re_l)}'
-
-            Re_sl_legend_elements.append(
-                plt.Line2D(
-                    [0],
-                    [0],
-                    color='black',
-                    linestyle=line_styles[i % len(line_styles)],
-                    marker=vec_s_lines[i],
-                    mfc='silver',
-                    markersize=12,
-                    label=series_label,
-                )
-            )
-
+        Re_sl_legend_elements = re_sl_legend_handles_from_meta(legend_series_meta)
         ax.legend(
             handles=Re_sl_legend_elements + legend_elements,
             ncol=LEGEND_TOP_NCOL,
@@ -1947,22 +1619,8 @@ def generate_dpdzt_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         )
 
         plt.tight_layout()
+        save_figure_to_sheet_dir(f'{sheet_name}_total_vs_Re_g', sheet_name)
 
-        output_dir = os.path.dirname(file_path)
-        sheet_dir = os.path.join(output_dir, sheet_name)
-        os.makedirs(sheet_dir, exist_ok=True)
-        base_name = f"{sheet_name}_total_vs_Re_g"
-        pdf_file = os.path.join(sheet_dir, f"{base_name}.pdf")
-        png_file = os.path.join(sheet_dir, f"{base_name}.png")
-        
-        plt.savefig(pdf_file, format='pdf', dpi=300, bbox_inches='tight', 
-                   pad_inches=0.1, facecolor='white', edgecolor='none')
-        print(f"Plot PDF salvo: {pdf_file}")
-        
-        plt.savefig(png_file, format='png', dpi=300, bbox_inches='tight', 
-                   pad_inches=0.1, facecolor='white', edgecolor='none')
-        print(f"Plot PNG salvo: {png_file}")
-        
     except Exception as e:
         print(f"Erro ao gerar plot: {e}")
         import traceback
@@ -2050,7 +1708,6 @@ def create_orientation_summary_dataframe(all_dataframes, selected_sheets):
                 T_col = _find_col('Temp.', 'Temp', 'T', 'T (C)', 'T(°C)')
                 P_col = _find_col('Gauge Pressure', 'Gauge P', 'Gauge P.', 'P', 'Pressure', 'Gauge P (kPa)', 'P (kPa)')
                 if jg_col is not None and T_col is not None and P_col is not None:
-                    D = 0.05251
                     P_vals = pd.to_numeric(df[P_col], errors='coerce')
                     T_vals = pd.to_numeric(df[T_col], errors='coerce')
                     P_Pa = P_vals + 101325
@@ -2058,8 +1715,11 @@ def create_orientation_summary_dataframe(all_dataframes, selected_sheets):
                     rho_G = [PropsSI('D', 'P', p, 'T', t, fluid_1) for p, t in zip(P_Pa, T_K)]
                     mu_G = [PropsSI('V', 'P', p, 'T', t, fluid_1) for p, t in zip(P_Pa, T_K)]
                     Re_sg_series = pd.Series(
-                        np.array(rho_G) * pd.to_numeric(df[jg_col], errors='coerce') * D / np.array(mu_G),
-                        index=df.index
+                        np.array(rho_G)
+                        * pd.to_numeric(df[jg_col], errors='coerce')
+                        * PIPE_DIAMETER_M
+                        / np.array(mu_G),
+                        index=df.index,
                     )
                 else:
                     print(f"Aviso: não foi possível calcular Re_sg para {sheet_name} (colunas ausentes: jG/Temp/Pressure).")
