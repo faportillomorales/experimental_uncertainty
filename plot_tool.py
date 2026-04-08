@@ -11,7 +11,7 @@ from contextlib import redirect_stderr
 ####################################################################################################################################################
 #                                            INPUTS
 ####################################################################################################################################################
-file_path = 'data_example/example/mean_v3/Mean_Experimental_Data_FSC2_v3.xlsx'  # Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
+file_path = 'data_example/example/mean_sf6_v2/Mean_Experimental_Data_FSC2_SF6_Oil_v2.xlsx'  # Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
 
 # Flag para indicar leitura de arquivo NAS processado (_processed_all_sheets.xlsx)
 NAS_file = False
@@ -1057,23 +1057,21 @@ def _x_values_from_ax_artists(ax, *, positive_only=False):
     return xs
 
 
-def finalize_jg_plot_xlim(ax, *, cap_when_max_below_one=2.0, margin_frac=0.05):
+def finalize_jg_plot_xlim(ax):
     """
-    Eixo X (j_g): origem em 0. Se j_g máximo < 1 m/s, limite superior = cap_when_max_below_one;
-    senão, margem acima do máximo dos dados.
+    Eixo X (j_g): origem em 0; limite superior = próxima unidade inteira acima de j_g máximo
+    (teto em 1 m/s, e se o máximo coincidir com um inteiro, usa o inteiro seguinte).
+    Ex.: j_g_max = 1,2 → limite 2; j_g_max = 2 → limite 3; j_g_max = 0,8 → limite 1.
     """
     xs = _x_values_from_ax_artists(ax, positive_only=False)
     if not xs:
-        ax.set_xlim(0, cap_when_max_below_one)
+        ax.set_xlim(0.0, 1.0)
         return
-    jg_max = max(xs)
-    if jg_max < 1.0:
-        ax.set_xlim(0.0, float(cap_when_max_below_one))
-    else:
-        right = jg_max * (1.0 + margin_frac)
-        if right <= jg_max:
-            right = jg_max + 1e-9
-        ax.set_xlim(0.0, right)
+    jg_max = float(max(xs))
+    x_hi = int(np.ceil(jg_max - 1e-12))
+    if x_hi <= jg_max:
+        x_hi += 1
+    ax.set_xlim(0.0, float(x_hi))
 
 
 def _re_sg_log_x_limits_from_artists(ax, *, fallback=(1000.0, 250000.0)):
