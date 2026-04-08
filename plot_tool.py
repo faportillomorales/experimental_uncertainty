@@ -23,7 +23,7 @@ ALLOWED_SHEETS_NAS = {
     'AOH00', 'AOU05', 'AOU90',
     'AOD05', 'AOD15E', 'AOD30', 'AOD45', 'AOD45E', 'AOD60', 'AOD60E', 'AOD85', 'AOD90',
     'SOH00', 'SOU05', 'SOU90',
-    'SOD05', 'SOD15', 'SOD45', 'SOD60', 'SOD85', 'SOD90',
+    'SOD05', 'SOD15', 'SOD15E', 'SOD30', 'SOD45', 'SOD60', 'SOD85', 'SOD90',
     'ADH00', 'ADU05', 'ADU90',
     'ADD05', 'ADD15', 'ADD45', 'ADD60', 'ADD85', 'ADD90',
 }
@@ -206,7 +206,7 @@ def extract_info_from_filename(filename: str):
         'W': 'Water',
         'O': 'Oil',
         'S': 'SF6',
-        'D': 'Dense Fluid'
+        'D': 'Dense Liquid'
     }
     direction_map = {
         'H': 'Horizontal',
@@ -853,12 +853,38 @@ YLABEL_DP_DZ_T = (
 )
 
 
+def _apply_mean_experimental_column_aliases(col_mapping):
+    """
+    Planilhas Mean_Experimental_Data_* (saída estilo exp_unc) usam -dpdz_F / -dpdz_T
+    em vez de dp/dz_F / dp/dz_T. Garante chaves canónicas para os plots.
+    """
+    if not col_mapping:
+        return
+    for canonical, prefixes in (
+        ('dp/dz_F', ('-dpdz_F', '-dpdz_f')),
+        ('dp/dz_T', ('-dpdz_T', '-dpdz_t')),
+    ):
+        if canonical in col_mapping:
+            continue
+        for p in prefixes:
+            if p in col_mapping:
+                col_mapping[canonical] = col_mapping[p]
+                break
+        if canonical in col_mapping:
+            continue
+        for key in col_mapping:
+            if key.startswith(prefixes[0]) or key.startswith(prefixes[1]):
+                col_mapping[canonical] = col_mapping[key]
+                break
+
+
 def build_column_mapping(df):
     """Mapeia nome de coluna normalizado (strip) → coluna original do DataFrame."""
     col_mapping = {}
     for col in df.columns:
         if pd.notna(col):
             col_mapping[str(col).strip()] = col
+    _apply_mean_experimental_column_aliases(col_mapping)
     return col_mapping
 
 
@@ -907,8 +933,8 @@ def coerce_measurement_columns_to_nan(df):
             'Void Fraction',
             'void fraction',
         ),
-        'dp/dz_F': ('dp/dz_F', '-dP/dz F', '-dP/dz f'),
-        'dp/dz_T': ('dp/dz_T', '-dP/dz T', '-dP/dz t'),
+        'dp/dz_F': ('dp/dz_F', '-dP/dz F', '-dP/dz f', '-dpdz_F', '-dpdz_f'),
+        'dp/dz_T': ('dp/dz_T', '-dP/dz T', '-dP/dz t', '-dpdz_T', '-dpdz_t'),
     }
 
     for _logical, aliases in aliases_by_quantity.items():
@@ -1003,6 +1029,71 @@ def flow_pattern_legend_handles(df_plot, flow_pattern_col, flow_pattern_symbols=
     return handles
 
 
+def _x_values_from_ax_artists(ax, *, positive_only=False):
+    """Recolhe coordenadas X de linhas e scatters no eixo (apenas finitas)."""
+    xs = []
+    for line in ax.get_lines():
+        xd = np.asarray(line.get_xdata(), dtype=float)
+        m = np.isfinite(xd)
+        if positive_only:
+            m = m & (xd > 0)
+        else:
+            m = m & (xd >= 0)
+        xd = xd[m]
+        if xd.size:
+            xs.extend(xd.tolist())
+    for coll in ax.collections:
+        off = coll.get_offsets()
+        if len(off):
+            xcol = np.asarray(off[:, 0], dtype=float)
+            m = np.isfinite(xcol)
+            if positive_only:
+                m = m & (xcol > 0)
+            else:
+                m = m & (xcol >= 0)
+            xcol = xcol[m]
+            if xcol.size:
+                xs.extend(xcol.tolist())
+    return xs
+
+
+def finalize_jg_plot_xlim(ax, *, cap_when_max_below_one=2.0, margin_frac=0.05):
+    """
+    Eixo X (j_g): origem em 0. Se j_g máximo < 1 m/s, limite superior = cap_when_max_below_one;
+    senão, margem acima do máximo dos dados.
+    """
+    xs = _x_values_from_ax_artists(ax, positive_only=False)
+    if not xs:
+        ax.set_xlim(0, cap_when_max_below_one)
+        return
+    jg_max = max(xs)
+    if jg_max < 1.0:
+        ax.set_xlim(0.0, float(cap_when_max_below_one))
+    else:
+        right = jg_max * (1.0 + margin_frac)
+        if right <= jg_max:
+            right = jg_max + 1e-9
+        ax.set_xlim(0.0, right)
+
+
+def _re_sg_log_x_limits_from_artists(ax, *, fallback=(1000.0, 250000.0)):
+    """
+    Limites do eixo X em escala log(Re_sg): inferior = 10^floor(log10(min)),
+    superior = 10^ceil(log10(max)), só com dados > 0.
+    """
+    xs = _x_values_from_ax_artists(ax, positive_only=True)
+    if not xs:
+        return fallback
+    rmin, rmax = min(xs), max(xs)
+    if rmin <= 0 or rmax <= 0:
+        return fallback
+    lo = 10.0 ** np.floor(np.log10(rmin))
+    hi = 10.0 ** np.ceil(np.log10(rmax))
+    if hi <= lo:
+        hi = lo * 10.0
+    return float(lo), float(hi)
+
+
 def style_axes_re_g_log_x(
     ax,
     *,
@@ -1011,7 +1102,8 @@ def style_axes_re_g_log_x(
     y_lim_top=None,
 ):
     """
-    Eixo X log (Re_sg), xlim fixo; eixo Y linear.
+    Eixo X em log(Re_sg): limite inferior 10^floor(log10(min x)), superior 10^ceil(log10(max x))
+    (só pontos com Re_sg > 0; sem dados mantém 10³–2,5×10⁵). Eixo Y linear.
 
     y_lim_bottom / y_lim_top: None = não alterar esse limite (mantém autoscale após o plot).
     Para dp/dz total, não fixar y inferior: valores podem ser negativos (ex. tubos inclinados).
@@ -1021,7 +1113,6 @@ def style_axes_re_g_log_x(
     ax.minorticks_on()
     if y_major_step is not None:
         ax.yaxis.set_major_locator(MultipleLocator(y_major_step))
-    ax.set_xlim(1000, 250000)
     if y_lim_bottom is not None or y_lim_top is not None:
         y0, y1 = ax.get_ylim()
         if y_lim_bottom is not None:
@@ -1030,6 +1121,8 @@ def style_axes_re_g_log_x(
             y1 = y_lim_top
         ax.set_ylim(y0, y1)
     ax.set_xscale('log')
+    x_lo, x_hi = _re_sg_log_x_limits_from_artists(ax)
+    ax.set_xlim(x_lo, x_hi)
     ax.tick_params(axis='both', which='major', labelsize=18, size=8)
     ax.tick_params(axis='both', which='minor', labelsize=18, size=6)
     for lb in ax.get_xticklabels() + ax.get_yticklabels():
@@ -1179,8 +1272,6 @@ def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         ax.xaxis.set_minor_locator(MultipleLocator(0.5))
         # ax.yaxis.set_minor_locator(MultipleLocator(0.05))
         
-        # Configurar limites dos eixos
-        ax.set_xlim(left=0)
         ax.set_ylim(bottom=0, top=1)
         
         # Configurar tamanho dos ticks com fonte acadêmica
@@ -1188,6 +1279,7 @@ def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         for label in ax.get_xticklabels() + ax.get_yticklabels():
             label.set_fontfamily('serif')
         apply_subtle_gray_grid(ax)
+        finalize_jg_plot_xlim(ax)
 
         jl_legend_elements = []
         for i, jl in enumerate(jl_series):
@@ -1336,8 +1428,6 @@ def generate_dpdzf_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         ax.xaxis.set_minor_locator(MultipleLocator(0.5))
         # ax.yaxis.set_minor_locator(MultipleLocator(0.05))
         
-        # Configurar limites dos eixos
-        ax.set_xlim(left=0)
         ax.set_ylim(bottom=0)
         
         # Configurar tamanho dos ticks com fonte acadêmica
@@ -1345,6 +1435,7 @@ def generate_dpdzf_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         for label in ax.get_xticklabels() + ax.get_yticklabels():
             label.set_fontfamily('serif')
         apply_subtle_gray_grid(ax)
+        finalize_jg_plot_xlim(ax)
 
         jl_legend_elements = []
         for i, jl in enumerate(jl_series):
@@ -1477,12 +1568,12 @@ def generate_dpdzt_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         ax.minorticks_on()
         ax.xaxis.set_major_locator(MultipleLocator(1.0))
         ax.xaxis.set_minor_locator(MultipleLocator(0.5))
-        ax.set_xlim(left=0)
 
         ax.tick_params(axis='both', which='major', labelsize=18)
         for label in ax.get_xticklabels() + ax.get_yticklabels():
             label.set_fontfamily('serif')
         apply_subtle_gray_grid(ax)
+        finalize_jg_plot_xlim(ax)
 
         jl_legend_elements = []
         for i, jl in enumerate(jl_series):
@@ -1950,16 +2041,10 @@ def create_orientation_summary_dataframe(all_dataframes, selected_sheets):
             
         df = all_dataframes[sheet_name]
         
-        # Verificar colunas necessárias
+        # Verificar colunas necessárias (build_column_mapping inclui aliases -dpdz_* dos ficheiros Mean)
         required_cols = ['jL', 'dp/dz_F', 'Flow Pattern']
-        available_cols = list(df.columns)
-        
-        col_mapping = {}
-        for col in available_cols:
-            if pd.notna(col):
-                clean_col = str(col).strip()
-                col_mapping[clean_col] = col
-        
+        col_mapping = build_column_mapping(df)
+
         missing_cols = []
         for req_col in required_cols:
             if req_col not in col_mapping:
