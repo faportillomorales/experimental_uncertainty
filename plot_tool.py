@@ -225,6 +225,143 @@ def extract_info_from_filename(filename: str):
     
     return fluid_1, fluid_2, direction, theta, ID, is_validation
 
+
+def two_phase_system_annotation_text(fluid_1, fluid_2):
+    """
+    Rótulo do sistema bifásico para plots de uma única inclinação (gás–líquido).
+    SF6 aparece como SF com subscrito 6 (mathtext).
+    """
+    def _token(name):
+        if name is None or (isinstance(name, float) and pd.isna(name)):
+            return '?'
+        s = str(name).strip()
+        key = s.upper().replace(' ', '').replace('_', '')
+        if key == 'SF6':
+            return r'SF$_{6}$'
+        return s
+
+    return f"System: {_token(fluid_1)}-{_token(fluid_2)}"
+
+
+def theta_and_system_axes_text(theta, fluid_1, fluid_2):
+    """Duas linhas: inclinação e sistema bifásico (texto nos eixos)."""
+    return (
+        rf'$\theta = {theta}^\circ$'
+        + '\n'
+        + two_phase_system_annotation_text(fluid_1, fluid_2)
+    )
+
+
+def _collect_xy_data_axes_norm(ax):
+    """Pontos plotados (linhas + scatter) em coordenadas de eixo normalizadas [0,1]."""
+    raw = []
+    for ln in ax.get_lines():
+        xd = np.asarray(ln.get_xdata(), dtype=float).ravel()
+        yd = np.asarray(ln.get_ydata(), dtype=float).ravel()
+        m = np.isfinite(xd) & np.isfinite(yd)
+        for x, y in zip(xd[m], yd[m]):
+            raw.append((x, y))
+    for coll in ax.collections:
+        off = coll.get_offsets()
+        if off is None or len(off) == 0:
+            continue
+        arr = np.asarray(off, dtype=float)
+        for i in range(arr.shape[0]):
+            x, y = float(arr[i, 0]), float(arr[i, 1])
+            if np.isfinite(x) and np.isfinite(y):
+                raw.append((x, y))
+    if not raw:
+        return np.empty((0, 2), dtype=float)
+    data_xy = np.asarray(raw, dtype=float)
+    trans = ax.transData
+    inv_axes = ax.transAxes.inverted()
+    out = []
+    for i in range(len(data_xy)):
+        try:
+            disp = trans.transform((data_xy[i, 0], data_xy[i, 1]))
+            axy = inv_axes.transform(disp)
+            if np.all(np.isfinite(axy)):
+                out.append(axy)
+        except (ValueError, OverflowError):
+            continue
+    if not out:
+        return np.empty((0, 2), dtype=float)
+    return np.asarray(out, dtype=float)
+
+
+def _text_bbox_axes_fraction(x0, y0, ha, va, w=0.34, h=0.15):
+    """Caixa aproximada do bloco de texto (duas linhas, fontsize ~18) em coords de eixo."""
+    if ha == 'left' and va == 'top':
+        l, r, b, t = x0, x0 + w, y0 - h, y0
+    elif ha == 'right' and va == 'bottom':
+        l, r, b, t = x0 - w, x0, y0, y0 + h
+    elif ha == 'left' and va == 'bottom':
+        l, r, b, t = x0, x0 + w, y0, y0 + h
+    elif ha == 'right' and va == 'top':
+        l, r, b, t = x0 - w, x0, y0 - h, y0
+    else:
+        l, r, b, t = x0, x0 + w, y0 - h, y0
+    l = float(np.clip(l, 0.0, 1.0))
+    r = float(np.clip(r, 0.0, 1.0))
+    b = float(np.clip(b, 0.0, 1.0))
+    t = float(np.clip(t, 0.0, 1.0))
+    if r < l:
+        l, r = r, l
+    if t < b:
+        b, t = t, b
+    return l, r, b, t
+
+
+def _best_theta_system_annotation_corner(ax):
+    """
+    Escolhe canto (coords transAxes + ha/va) com menos sobreposição estimada
+    com pontos/linhas; em empate, maximiza distância do âncora ao ponto mais próximo.
+    """
+    candidates = [
+        (0.02, 0.98, 'left', 'top'),
+        (0.98, 0.02, 'right', 'bottom'),
+        (0.02, 0.02, 'left', 'bottom'),
+        (0.98, 0.98, 'right', 'top'),
+    ]
+    ax_pts = _collect_xy_data_axes_norm(ax)
+    if len(ax_pts) == 0:
+        return candidates[0]
+
+    best = candidates[0]
+    best_key = None
+    for x0, y0, ha, va in candidates:
+        l, r, b, top = _text_bbox_axes_fraction(x0, y0, ha, va)
+        n_in = int(
+            np.sum(
+                (ax_pts[:, 0] >= l)
+                & (ax_pts[:, 0] <= r)
+                & (ax_pts[:, 1] >= b)
+                & (ax_pts[:, 1] <= top)
+            )
+        )
+        dmin = float(np.min(np.hypot(ax_pts[:, 0] - x0, ax_pts[:, 1] - y0)))
+        key = (n_in, -dmin)
+        if best_key is None or key < best_key:
+            best_key = key
+            best = (x0, y0, ha, va)
+    return best
+
+
+def place_theta_and_system_annotation(ax, theta, fluid_1, fluid_2, fontsize=18):
+    """Coloca θ + System nos eixos, num canto que evita sobrepor dados."""
+    x0, y0, ha, va = _best_theta_system_annotation_corner(ax)
+    ax.text(
+        x0,
+        y0,
+        theta_and_system_axes_text(theta, fluid_1, fluid_2),
+        transform=ax.transAxes,
+        fontsize=fontsize,
+        fontfamily='serif',
+        ha=ha,
+        va=va,
+    )
+
+
 def read_excel_file(file_path):
     """
     Lê um arquivo Excel e retorna um DataFrame com os dados.
@@ -737,6 +874,14 @@ def setup_plot_style():
     })
 
 
+def apply_axis_tick_style_alpha_vs_jg(ax):
+    """
+    Estilo de ticks igual ao de alpha_vs_jg: rótulos major a 18 pt; comprimento
+    dos traços major/minor fica o padrão do matplotlib (sem forçar size).
+    """
+    ax.tick_params(axis='both', which='major', labelsize=18)
+
+
 def apply_subtle_gray_grid(ax):
     """
     Grade cinza discreta por trás dos dados: linhas dos ticks principais um pouco
@@ -1074,6 +1219,33 @@ def finalize_jg_plot_xlim(ax):
     ax.set_xlim(0.0, float(x_hi))
 
 
+def apply_dpdz_yaxis_tick_locators_small_scale(ax, *, y_top_threshold_kpa_m=1.5):
+    """
+    Gradientes ∂P/∂z (eixo Y em kPa/m): se o limite superior Y for estritamente
+    inferior a y_top_threshold_kpa_m (padrão 1,5), usa major 0,2 e minor 0,1;
+    caso contrário não altera os localizadores já definidos no eixo Y.
+    """
+    _y_top = ax.get_ylim()[1]
+    if _y_top < float(y_top_threshold_kpa_m):
+        ax.yaxis.set_major_locator(MultipleLocator(0.2))
+        ax.yaxis.set_minor_locator(MultipleLocator(0.1))
+
+
+def apply_jg_xaxis_tick_locators(ax, *, jg_max_threshold=5.0):
+    """
+    Eixo X (j_g): se o máximo dos dados plotados for < jg_max_threshold,
+    ticks principais a cada 0,5 e secundários a cada 0,25; caso contrário 1,0 e 0,5.
+    """
+    xs = _x_values_from_ax_artists(ax, positive_only=False)
+    jg_max = 0.0 if not xs else float(max(xs))
+    if jg_max < float(jg_max_threshold):
+        ax.xaxis.set_major_locator(MultipleLocator(0.5))
+        ax.xaxis.set_minor_locator(MultipleLocator(0.25))
+    else:
+        ax.xaxis.set_major_locator(MultipleLocator(1.0))
+        ax.xaxis.set_minor_locator(MultipleLocator(0.5))
+
+
 def _re_sg_log_x_limits_from_artists(ax, *, fallback=(1000.0, 250000.0)):
     """
     Limites do eixo X em escala log(Re_sg): inferior = 10^floor(log10(min)),
@@ -1121,8 +1293,7 @@ def style_axes_re_g_log_x(
     ax.set_xscale('log')
     x_lo, x_hi = _re_sg_log_x_limits_from_artists(ax)
     ax.set_xlim(x_lo, x_hi)
-    ax.tick_params(axis='both', which='major', labelsize=18, size=8)
-    ax.tick_params(axis='both', which='minor', labelsize=18, size=6)
+    apply_axis_tick_style_alpha_vs_jg(ax)
     for lb in ax.get_xticklabels() + ax.get_yticklabels():
         lb.set_fontfamily('serif')
     apply_subtle_gray_grid(ax)
@@ -1251,7 +1422,7 @@ def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         )
 
         x_label = r'$j_{g} [m/s]$'
-        y_label = r'Void fraction ($\alpha_g$)'
+        y_label = r'$\alpha_g$ [-]'
         # Configurar eixos com fonte acadêmica
         ax.set_xlabel(x_label, fontsize=24, fontfamily='serif')
         ax.set_ylabel(y_label, fontsize=24, fontfamily='serif')
@@ -1262,22 +1433,19 @@ def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         # Configurar ticks menores para grade mais detalhada
         ax.minorticks_on()
         
-        # Configurar espaçamento dos ticks principais
-        ax.xaxis.set_major_locator(MultipleLocator(1.0))
+        # Configurar espaçamento dos ticks principais (Y); X conforme j_g máximo
         ax.yaxis.set_major_locator(MultipleLocator(0.1))
         
-        # Configurar espaçamento dos ticks menores
-        ax.xaxis.set_minor_locator(MultipleLocator(0.5))
         # ax.yaxis.set_minor_locator(MultipleLocator(0.05))
         
         ax.set_ylim(bottom=0, top=1)
         
-        # Configurar tamanho dos ticks com fonte acadêmica
-        ax.tick_params(axis='both', which='major', labelsize=18)
+        apply_axis_tick_style_alpha_vs_jg(ax)
         for label in ax.get_xticklabels() + ax.get_yticklabels():
             label.set_fontfamily('serif')
         apply_subtle_gray_grid(ax)
         finalize_jg_plot_xlim(ax)
+        apply_jg_xaxis_tick_locators(ax)
 
         jl_legend_elements = []
         for i, jl in enumerate(jl_series):
@@ -1297,16 +1465,7 @@ def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
             ncol=LEGEND_TOP_NCOL,
             **LEGEND_TOP_KWARGS,
         )
-        ax.text(
-            0.97,
-            0.03,
-            rf'$\theta = {theta}^\circ$',
-            transform=ax.transAxes,
-            fontsize=20,
-            fontfamily='serif',
-            ha='right',
-            va='bottom',
-        )
+        place_theta_and_system_annotation(ax, theta, fluid_1, fluid_2)
 
         plt.tight_layout()
         save_figure_to_sheet_dir(f'{sheet_name}_alpha_vs_jg', sheet_name)
@@ -1418,22 +1577,20 @@ def generate_dpdzf_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         # Configurar ticks menores para grade mais detalhada
         ax.minorticks_on()
         
-        # Configurar espaçamento dos ticks principais
-        ax.xaxis.set_major_locator(MultipleLocator(1.0))
+        # Configurar espaçamento dos ticks principais (Y); X conforme j_g máximo
         ax.yaxis.set_major_locator(MultipleLocator(0.5))
         
-        # Configurar espaçamento dos ticks menores
-        ax.xaxis.set_minor_locator(MultipleLocator(0.5))
         # ax.yaxis.set_minor_locator(MultipleLocator(0.05))
         
         ax.set_ylim(bottom=0)
         
-        # Configurar tamanho dos ticks com fonte acadêmica
-        ax.tick_params(axis='both', which='major', labelsize=18)
+        apply_axis_tick_style_alpha_vs_jg(ax)
         for label in ax.get_xticklabels() + ax.get_yticklabels():
             label.set_fontfamily('serif')
         apply_subtle_gray_grid(ax)
         finalize_jg_plot_xlim(ax)
+        apply_jg_xaxis_tick_locators(ax)
+        apply_dpdz_yaxis_tick_locators_small_scale(ax)
 
         jl_legend_elements = []
         for i, jl in enumerate(jl_series):
@@ -1454,15 +1611,7 @@ def generate_dpdzf_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
             ncol=LEGEND_TOP_NCOL,
             **LEGEND_TOP_KWARGS,
         )
-        ax.text(
-            0.03,
-            0.92,
-            rf'$\theta = {theta}^\circ$',
-            transform=ax.transAxes,
-            fontsize=20,
-            fontfamily='serif',
-            verticalalignment='top',
-        )
+        place_theta_and_system_annotation(ax, theta, fluid_1, fluid_2)
 
         plt.tight_layout()
         save_figure_to_sheet_dir(f'{sheet_name}_frictional_vs_jg', sheet_name)
@@ -1564,14 +1713,14 @@ def generate_dpdzt_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
 
         ax.set_axisbelow(True)
         ax.minorticks_on()
-        ax.xaxis.set_major_locator(MultipleLocator(1.0))
-        ax.xaxis.set_minor_locator(MultipleLocator(0.5))
 
-        ax.tick_params(axis='both', which='major', labelsize=18)
+        apply_axis_tick_style_alpha_vs_jg(ax)
         for label in ax.get_xticklabels() + ax.get_yticklabels():
             label.set_fontfamily('serif')
         apply_subtle_gray_grid(ax)
         finalize_jg_plot_xlim(ax)
+        apply_jg_xaxis_tick_locators(ax)
+        apply_dpdz_yaxis_tick_locators_small_scale(ax)
 
         jl_legend_elements = []
         for i, jl in enumerate(jl_series):
@@ -1592,15 +1741,7 @@ def generate_dpdzt_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
             ncol=LEGEND_TOP_NCOL,
             **LEGEND_TOP_KWARGS,
         )
-        ax.text(
-            0.03,
-            0.92,
-            rf'$\theta = {theta}^\circ$',
-            transform=ax.transAxes,
-            fontsize=20,
-            fontfamily='serif',
-            verticalalignment='top',
-        )
+        place_theta_and_system_annotation(ax, theta, fluid_1, fluid_2)
 
         plt.tight_layout()
         save_figure_to_sheet_dir(f'{sheet_name}_total_vs_jg', sheet_name)
@@ -1716,7 +1857,7 @@ def generate_alpha_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         )
 
         ax.set_xlabel(r'$Re_{sg}$', fontsize=24, fontfamily='serif')
-        ax.set_ylabel(r'Void fraction ($\alpha_g$)', fontsize=24, fontfamily='serif')
+        ax.set_ylabel(r'$\alpha_g$ [-]', fontsize=24, fontfamily='serif')
         style_axes_re_g_log_x(ax, y_major_step=0.1, y_lim_bottom=0, y_lim_top=1.0)
 
         Re_sl_legend_elements = re_sl_legend_handles_from_meta(legend_series_meta)
@@ -1728,16 +1869,7 @@ def generate_alpha_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
                 ncol=LEGEND_TOP_NCOL,
                 **LEGEND_TOP_KWARGS,
             )
-        ax.text(
-            0.97,
-            0.03,
-            rf'$\theta = {theta}^\circ$',
-            transform=ax.transAxes,
-            fontsize=20,
-            fontfamily='serif',
-            ha='right',
-            va='bottom',
-        )
+        place_theta_and_system_annotation(ax, theta, fluid_1, fluid_2)
 
         plt.tight_layout()
         save_figure_to_sheet_dir(f'{sheet_name}_alpha_vs_Re_g', sheet_name)
@@ -1857,6 +1989,7 @@ def generate_dpdzf_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         ax.set_xlabel(r'$Re_{sg}$', fontsize=24, fontfamily='serif')
         ax.set_ylabel(YLABEL_DP_DZ_F, fontsize=24, fontfamily='serif')
         style_axes_re_g_log_x(ax, y_major_step=0.5, y_lim_bottom=0, y_lim_top=None)
+        apply_dpdz_yaxis_tick_locators_small_scale(ax)
 
         Re_sl_legend_elements = re_sl_legend_handles_from_meta(legend_series_meta)
         ax.legend(
@@ -1864,15 +1997,7 @@ def generate_dpdzf_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
             ncol=LEGEND_TOP_NCOL,
             **LEGEND_TOP_KWARGS,
         )
-        ax.text(
-            0.03,
-            0.92,
-            rf'$\theta = {theta}^\circ$',
-            transform=ax.transAxes,
-            fontsize=20,
-            fontfamily='serif',
-            verticalalignment='top',
-        )
+        place_theta_and_system_annotation(ax, theta, fluid_1, fluid_2)
 
         plt.tight_layout()
         save_figure_to_sheet_dir(f'{sheet_name}_frictional_vs_Re_g', sheet_name)
@@ -1992,6 +2117,7 @@ def generate_dpdzt_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         ax.set_ylabel(YLABEL_DP_DZ_T, fontsize=24, fontfamily='serif')
         # Total: não forçar y ≥ 0 (gradiente pode ser negativo); ticks Y automáticos.
         style_axes_re_g_log_x(ax, y_major_step=None, y_lim_bottom=None, y_lim_top=None)
+        apply_dpdz_yaxis_tick_locators_small_scale(ax)
 
         Re_sl_legend_elements = re_sl_legend_handles_from_meta(legend_series_meta)
         ax.legend(
@@ -1999,15 +2125,7 @@ def generate_dpdzt_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
             ncol=LEGEND_TOP_NCOL,
             **LEGEND_TOP_KWARGS,
         )
-        ax.text(
-            0.03,
-            0.92,
-            rf'$\theta = {theta}^\circ$',
-            transform=ax.transAxes,
-            fontsize=20,
-            fontfamily='serif',
-            verticalalignment='top',
-        )
+        place_theta_and_system_annotation(ax, theta, fluid_1, fluid_2)
 
         plt.tight_layout()
         save_figure_to_sheet_dir(f'{sheet_name}_total_vs_Re_g', sheet_name)
@@ -2470,8 +2588,7 @@ def _generate_orientation_plot_for_quantity(
         ax.set_ylabel(y_label, fontsize=24, fontfamily='serif')
         ax.set_axisbelow(True)
         ax.minorticks_on()
-        # Ticks como em alpha_vs_jg
-        ax.tick_params(axis='both', which='major', labelsize=18)
+        apply_axis_tick_style_alpha_vs_jg(ax)
         for label in ax.get_xticklabels() + ax.get_yticklabels():
             label.set_fontfamily('serif')
 
@@ -2640,7 +2757,7 @@ def generate_alpha_vs_orientation_plot(all_dataframes, selected_sheets, units_di
             orientation_plots_dir=orientation_plots_dir,
             unique_re_sl=unique_re_sl,
             y_column='alpha',
-            y_label=r'Void fraction $\alpha$',
+            y_label=r'$\alpha_g$ [-]',
             base_name_prefix='alpha_vs_orientation',
         )
     except Exception as e:
