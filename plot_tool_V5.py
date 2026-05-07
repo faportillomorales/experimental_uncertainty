@@ -1,20 +1,75 @@
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.ticker import MultipleLocator
-from CoolProp.CoolProp import PropsSI
-import os
-from pathlib import Path
-import warnings
-from contextlib import redirect_stderr
+"""
+Ferramentas de leitura de dados experimentais e geração de figuras (plot_tool V4).
 
-####################################################################################################################################################
-#                                            INPUTS
-####################################################################################################################################################
-file_path = 'data_example/example/NAS/Experimental_Results_v25_NAS_19_feb_2026_revA.xlsm'  # Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
+O script segue um fluxo único: configurar ``file_path`` / ``NAS_file``, carregar o Excel,
+padronizar colunas quando aplicável e gravar PDF/PNG por tipo de gráfico e por aba.
+"""
+from contextlib import redirect_stderr
+import os
+import warnings
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
+from matplotlib.legend import Legend
+from matplotlib.legend_handler import HandlerBase
+from matplotlib.lines import Line2D
+from matplotlib.ticker import FuncFormatter, MultipleLocator
+import numpy as np
+import pandas as pd
+from CoolProp.CoolProp import PropsSI
+
+
+class LegendGridPlaceholder(Line2D):
+    """
+    Proxy só para identificação no ``handler_map``. Subclasse de Line2D para não colidir
+    com patches usados em outros contextos.
+    """
+
+    def __init__(self):
+        super().__init__(
+            [],
+            [],
+            linestyle='none',
+            marker='',
+            linewidth=0,
+            color=(1, 1, 1, 0),
+            label=' ',
+        )
+
+
+class HandlerLegendGridPlaceholder(HandlerBase):
+    """
+    Desenha apenas uma linha com espessura 0 e cor RGBA (0,0,0,0); os backends AGG/PDF
+    normalmente não rasterizam isso (ao contrário de Patch com ``edgecolor='none'``,
+    que por vezes deixa um traço de 1 px por anti-aliasing).
+    """
+
+    def create_artists(self, legend, orig_handle, xdescent, ydescent, width, height, fontsize, trans):
+        yc = (height - ydescent) * 0.5
+        line = Line2D(
+            (-xdescent, -xdescent + width),
+            (yc, yc),
+            linewidth=0,
+            linestyle='solid',
+            color=(0, 0, 0, 0),
+            antialiased=False,
+            solid_capstyle='butt',
+        )
+        line.set_transform(trans)
+        return [line]
+
+
+Legend.update_default_handler_map({
+    LegendGridPlaceholder: HandlerLegendGridPlaceholder(),
+})
+
+
+# --- Inputs globais (execução como script) ---
+file_path = 'data_example/example/mean_sf6_v2/Mean_Experimental_Data_FSC2_SF6_Oil_v2.xlsx'  # Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
 
 # Flag para indicar leitura de workbook NAS já processado (``processed_all_sheets_<nome>.xlsx``)
-NAS_file = True
+NAS_file = False
 
 # Abas válidas para arquivos NAS (as demais serão ignoradas)
 ALLOWED_SHEETS_NAS = {
@@ -31,20 +86,29 @@ ALLOWED_SHEETS_NAS = {
 # Mapeamento de códigos curtos de flow pattern (formato NAS) para os nomes usados nos gráficos
 NAS_FLOW_PATTERN_MAP = {
     'AN': 'Annular',
-    'SL': 'Slug',
-    'CH': 'Churn',
-    'SW': 'Stratified wavy',
-    'ST': 'Stratified',
+    'FF': 'Falling Film',
     'SS': 'Stratified Smooth',
-    'EB': 'Elongated bubble',
+    'SW': 'Stratified Wavy',
+    'RW': 'Rolling Wavy',
+    'ST&MI': 'Stratified with Mixed Interface',
+    'SL': 'Slug',
+    'PSL': 'Pseudo-Slug',
+    'CH': 'Churn',
+    'DC': 'Dual-Continuous',      
+    'DB': 'Dispersed bubbles',
+    
     # Variantes com maiúscula/minúscula (normalizadas por strip().upper() na leitura)
     'ANNULAR': 'Annular',
-    'SLUG': 'Slug',
-    'CHURN': 'Churn',
-    'STRATIFIED WAVY': 'Stratified wavy',
-    'STRATIFIED': 'Stratified',
+    'FALLING FILM': 'Falling Film',
     'STRATIFIED SMOOTH': 'Stratified Smooth',
-    'ELONGATED BUBBLE': 'Elongated bubble',
+    'STRATIFIED WAVY': 'Stratified Wavy',
+    'ROLLING WAVY': 'Rolling Wavy',
+    'STRATIFIED WITH MIXED INTERFACE': 'Stratified with Mixed Interface',
+    'SLUG': 'Slug',
+    'PSEUDO-SLUG': 'Pseudo-Slug',
+    'CHURN': 'Churn',
+    'DUAL-CONTINUOUS': 'Dual-Continuous',
+    'DISPERSED BUBBLES': 'Dispersed bubbles',
 }
 
 # Suprimir avisos específicos do pandas
@@ -61,6 +125,7 @@ LEGEND_TOP_KWARGS = {
     'frameon': False,
     'fontsize': 16,
     'prop': {'family': 'serif'},
+    'handler_map': {LegendGridPlaceholder: HandlerLegendGridPlaceholder()},
 }
 LEGEND_TOP_NCOL = 4
 PIPE_DIAMETER_M = 0.05251
@@ -72,6 +137,44 @@ def _safe_processed_filename_segment(name: str) -> str:
     for c in '\\/:*?"<>|':
         s = s.replace(c, '_')
     return s or 'Sheet1'
+
+
+def _base_strip_column_mapping(df):
+    """
+    Nome de coluna sem espaços externos → objeto coluna original no ``DataFrame``.
+    Sem aliases experimentais (contrasta com ``build_column_mapping``).
+    """
+    return {str(col).strip(): col for col in df.columns if pd.notna(col)}
+
+
+def _density_viscosity_liquid_25c(fluid_2):
+    """
+    Densidade [kg/m³] e viscosidade dinâmica [Pa·s] do líquido a 25 °C e 1 atm.
+    Mesma lógica que ``standardize_liquid_conditions`` (Water / Oil / CoolProp / fallback).
+    """
+    temp_c = 25.0
+    temp_k = temp_c + 273.15
+    if fluid_2 == 'Water':
+        rho = PropsSI('D', 'P', 101325, 'T', temp_k, 'Water')
+        mu = PropsSI('V', 'P', 101325, 'T', temp_k, 'Water')
+    elif fluid_2 == 'Oil':
+        rho = 0.0008 * temp_c**2 - 0.698 * temp_c + 879.154
+        mu_cp = 0.031267 * (temp_c**2) - 3.2050 * temp_c + 97.6594
+        mu = mu_cp * 1e-3
+    else:
+        try:
+            rho = PropsSI('D', 'P', 101325, 'T', temp_k, fluid_2)
+            mu = PropsSI('V', 'P', 101325, 'T', temp_k, fluid_2)
+        except Exception:
+            rho = PropsSI('D', 'P', 101325, 'T', temp_k, 'Water')
+            mu = PropsSI('V', 'P', 101325, 'T', temp_k, 'Water')
+    return rho, mu
+
+
+def _set_ticklabels_font_serif(ax):
+    """Aplica fonte serif aos rótulos numéricos dos eixos."""
+    for lbl in ax.get_xticklabels() + ax.get_yticklabels():
+        lbl.set_fontfamily('serif')
 
 
 def get_series_line_and_marker_styles():
@@ -96,29 +199,88 @@ def get_series_line_and_marker_styles():
         '-',
         '--',
     )
-    marker_symbols = ('o', 'h', 'p', 'D', 's', '^', 'v')
+    marker_symbols = ('^', 'v', 's', 'D', 'd', 'p', 'o', 'h', '8', '*', 'X')
     return line_styles, marker_symbols
+
+
+def _jl_proximity_cluster_assignments(jl_raw: pd.Series, tolerance_abs: float):
+    """
+    Agrupa valores distintos de j_L por proximidade (greedy sobre únicos ordenados).
+    Devolve, por linha: média do cluster e id inteiro do cluster (0..G-1, por média crescente).
+    """
+    idx = jl_raw.index
+    arr = jl_raw.to_numpy(dtype=float)
+    n = len(arr)
+    u = np.sort(np.unique(arr[np.isfinite(arr)]))
+    if u.size == 0:
+        nan_s = pd.Series(np.nan, index=idx, dtype=float)
+        return nan_s, nan_s.copy()
+
+    groups = []
+    cur = [float(u[0])]
+    for i in range(1, len(u)):
+        v = float(u[i])
+        if abs(v - float(np.mean(cur))) <= tolerance_abs:
+            cur.append(v)
+        else:
+            groups.append(cur)
+            cur = [v]
+    groups.append(cur)
+
+    groups_with_mean = [(float(np.mean(g)), g) for g in groups]
+    groups_with_mean.sort(key=lambda t: t[0])
+
+    val_to_mean = {}
+    val_to_gid = {}
+    for gid, (m, g) in enumerate(groups_with_mean):
+        for x in g:
+            xf = float(x)
+            val_to_mean[xf] = m
+            val_to_gid[xf] = gid
+
+    jl_mean_row = np.full(n, np.nan)
+    jl_gid_row = np.full(n, np.nan)
+    for i in range(n):
+        x = arr[i]
+        if not np.isfinite(x):
+            continue
+        xf = float(x)
+        best_key = None
+        best_d = np.inf
+        for k in val_to_mean:
+            d = abs(float(k) - xf)
+            if d < best_d:
+                best_d = d
+                best_key = k
+        if best_key is not None and np.isclose(best_key, xf, rtol=1e-9, atol=1e-7):
+            jl_mean_row[i] = val_to_mean[best_key]
+            jl_gid_row[i] = float(val_to_gid[best_key])
+
+    return (
+        pd.Series(jl_mean_row, index=idx),
+        pd.Series(jl_gid_row, index=idx),
+    )
 
 
 def standardize_liquid_conditions(
     all_dataframes: dict,
     *,
-    target_jl_levels=(0.2, 0.4, 0.8, 1.6),
-    jl_group_size=4,
     jl_tolerance=0.05,
     D=PIPE_DIAMETER_M,
 ):
     """
     Padroniza a condição do líquido para todas as inclinações/abas.
-    
-    - Força jL em 4 níveis (P01–P04, P05–P08, P09–P12, P13–P16) ou, quando a
-      contagem variar, aplica em blocos sucessivos de `jl_group_size`.
+
+    - Agrupa os j_L medidos por proximidade (`jl_tolerance` em m/s), substitui a coluna
+      jL pela média de cada grupo (para Reynolds e gráficos que usam jL pós-processado).
+    - Mantém jL_raw com os valores da planilha (inalterados após a primeira cópia).
     - Usa propriedades termofísicas do fluido líquido (Water/Oil/SF6, etc.)
-      em 25°C e 1 atm para calcular o número de Reynolds superficial do líquido Re_sl.
+      em 25°C e 1 atm para calcular Re_sl.
     - Grava/atualiza colunas:
-      - Re_sl_raw: Re_sl calculado ponto a ponto com jL padronizado
-      - Re_sl_group: Re_sl constante por bloco (igual ao Re_sl do nível jL do bloco)
-      - jL_group_id: id do bloco (0,1,2,...)
+      - jL_raw: cópia do j_L medido antes da substituição por médias de cluster
+      - Re_sl_raw: Re_sl com jL = média do cluster de proximidade
+      - Re_sl_group: média de Re_sl_raw por jL_group_id (coerente com o cluster)
+      - jL_group_id: id do cluster (ordenado por média de j_L crescente)
     """
     if not all_dataframes:
         return all_dataframes
@@ -127,43 +289,21 @@ def standardize_liquid_conditions(
         if df is None or not isinstance(df, pd.DataFrame) or df.empty:
             continue
 
-        # Encontrar coluna de jL (com tolerância a espaços)
-        col_mapping = {}
-        for col in list(df.columns):
-            if pd.notna(col):
-                col_mapping[str(col).strip()] = col
+        # Encontrar coluna de jL (com tolerância a espaços); sem aliases — igual ao histórico
+        col_mapping = _base_strip_column_mapping(df)
         if 'jL' not in col_mapping:
             print(f"Aviso: coluna 'jL' não encontrada em {sheet_name}; padronização de líquido ignorada.")
             continue
 
         jl_col = col_mapping['jL']
-        n = len(df)
-        group_ids = (np.arange(n) // jl_group_size).astype(int)
-        df['jL_group_id'] = group_ids
-        # Valores medidos antes da padronização (para relatórios / orientation_summary)
+        # Valores medidos antes da substituição por médias de cluster (matrizes / paridade)
         df['jL_raw'] = pd.to_numeric(df[jl_col], errors='coerce')
 
-        # Padronizar jL por grupo sequencial (p01–p04, p05–p08, ...)
-        for g in np.unique(group_ids):
-            mask_g = group_ids == g
-            jl_vals = pd.to_numeric(df.loc[mask_g, jl_col], errors='coerce')
-            jl_mean = jl_vals.mean()
-
-            # Selecionar nível alvo: grupos 0..3 mapeiam para (0.2, 0.4, 0.8, 1.6)
-            # Se houver mais grupos, reutiliza o último nível (mais conservador) por padrão.
-            if g < len(target_jl_levels):
-                target_jl = float(target_jl_levels[g])
-            else:
-                target_jl = float(target_jl_levels[-1])
-
-            # Checagem de consistência: se a média do grupo estiver muito longe do alvo, avisar
-            if pd.notna(jl_mean) and abs(float(jl_mean) - target_jl) > jl_tolerance:
-                print(
-                    f"Aviso: {sheet_name} grupo {g}: média jL={jl_mean:.3f} m/s distante do alvo "
-                    f"{target_jl:.3f} m/s (tol={jl_tolerance}). Sobrescrevendo mesmo assim."
-                )
-
-            df.loc[mask_g, jl_col] = target_jl
+        jl_cluster_mean, jl_gid = _jl_proximity_cluster_assignments(
+            df['jL_raw'], jl_tolerance
+        )
+        df[jl_col] = jl_cluster_mean
+        df['jL_group_id'] = jl_gid
 
         # Identificar fluido líquido a partir do nome da aba (mesma convenção de extract_info_from_filename)
         try:
@@ -171,36 +311,19 @@ def standardize_liquid_conditions(
         except Exception:
             fluid_2 = 'Water'
 
-        # Densidade e viscosidade do líquido a 25°C e 1 atm
-        temp_c = 25.0
-        temp_k = temp_c + 273.15
-        if fluid_2 == 'Water':
-            rho_L_fixed = PropsSI('D', 'P', 101325, 'T', temp_k, 'Water')
-            mu_L_fixed = PropsSI('V', 'P', 101325, 'T', temp_k, 'Water')
-        elif fluid_2 == 'Oil':
-            # Mesmo modelo usado em exp_unc.py (em Pa·s)
-            rho_L_fixed = 0.0008 * temp_c**2 - 0.698 * temp_c + 879.154
-            mu_cp = 0.031267 * (temp_c**2) - 3.2050 * temp_c + 97.6594
-            mu_L_fixed = mu_cp * 1e-3
-        else:
-            # Tentar usar CoolProp diretamente para outros líquidos
-            try:
-                rho_L_fixed = PropsSI('D', 'P', 101325, 'T', temp_k, fluid_2)
-                mu_L_fixed = PropsSI('V', 'P', 101325, 'T', temp_k, fluid_2)
-            except Exception:
-                rho_L_fixed = PropsSI('D', 'P', 101325, 'T', temp_k, 'Water')
-                mu_L_fixed = PropsSI('V', 'P', 101325, 'T', temp_k, 'Water')
+        rho_L_fixed, mu_L_fixed = _density_viscosity_liquid_25c(fluid_2)
 
-        # Número de Reynolds superficial do líquido (Re_sl) com jL padronizado (constante por grupo)
+        # Re_sl com jL = média do cluster de proximidade (coluna jL já substituída acima)
         jl_numeric = pd.to_numeric(df[jl_col], errors='coerce')
         Re_sl_raw = rho_L_fixed * jl_numeric * D / mu_L_fixed
         df['Re_sl_raw'] = Re_sl_raw
-        
-        # Re_sl_group: constante dentro do grupo (média do grupo após padronização)
+
+        # Média de Re_sl por jL_group_id (coerente com o agrupamento por proximidade)
         Re_sl_group = df.groupby('jL_group_id')['Re_sl_raw'].transform('mean')
         df['Re_sl_group'] = Re_sl_group
 
     return all_dataframes
+
 
 def extract_info_from_filename(filename: str):
     """
@@ -234,143 +357,6 @@ def extract_info_from_filename(filename: str):
     ID = base_name[5+offset:]
     
     return fluid_1, fluid_2, direction, theta, ID, is_validation
-
-
-def two_phase_system_annotation_text(fluid_1, fluid_2):
-    """
-    Rótulo do sistema bifásico para plots de uma única inclinação (gás–líquido).
-    SF6 aparece como SF com subscrito 6 (mathtext).
-    """
-    def _token(name):
-        if name is None or (isinstance(name, float) and pd.isna(name)):
-            return '?'
-        s = str(name).strip()
-        key = s.upper().replace(' ', '').replace('_', '')
-        if key == 'SF6':
-            return r'SF$_{6}$'
-        return s
-
-    return f"System: {_token(fluid_1)}-{_token(fluid_2)}"
-
-
-def theta_and_system_axes_text(theta, fluid_1, fluid_2):
-    """Duas linhas: inclinação e sistema bifásico (texto nos eixos)."""
-    return (
-        rf'$\theta = {theta}^\circ$'
-        + '\n'
-        + two_phase_system_annotation_text(fluid_1, fluid_2)
-    )
-
-
-def _collect_xy_data_axes_norm(ax):
-    """Pontos plotados (linhas + scatter) em coordenadas de eixo normalizadas [0,1]."""
-    raw = []
-    for ln in ax.get_lines():
-        xd = np.asarray(ln.get_xdata(), dtype=float).ravel()
-        yd = np.asarray(ln.get_ydata(), dtype=float).ravel()
-        m = np.isfinite(xd) & np.isfinite(yd)
-        for x, y in zip(xd[m], yd[m]):
-            raw.append((x, y))
-    for coll in ax.collections:
-        off = coll.get_offsets()
-        if off is None or len(off) == 0:
-            continue
-        arr = np.asarray(off, dtype=float)
-        for i in range(arr.shape[0]):
-            x, y = float(arr[i, 0]), float(arr[i, 1])
-            if np.isfinite(x) and np.isfinite(y):
-                raw.append((x, y))
-    if not raw:
-        return np.empty((0, 2), dtype=float)
-    data_xy = np.asarray(raw, dtype=float)
-    trans = ax.transData
-    inv_axes = ax.transAxes.inverted()
-    out = []
-    for i in range(len(data_xy)):
-        try:
-            disp = trans.transform((data_xy[i, 0], data_xy[i, 1]))
-            axy = inv_axes.transform(disp)
-            if np.all(np.isfinite(axy)):
-                out.append(axy)
-        except (ValueError, OverflowError):
-            continue
-    if not out:
-        return np.empty((0, 2), dtype=float)
-    return np.asarray(out, dtype=float)
-
-
-def _text_bbox_axes_fraction(x0, y0, ha, va, w=0.34, h=0.15):
-    """Caixa aproximada do bloco de texto (duas linhas, fontsize ~18) em coords de eixo."""
-    if ha == 'left' and va == 'top':
-        l, r, b, t = x0, x0 + w, y0 - h, y0
-    elif ha == 'right' and va == 'bottom':
-        l, r, b, t = x0 - w, x0, y0, y0 + h
-    elif ha == 'left' and va == 'bottom':
-        l, r, b, t = x0, x0 + w, y0, y0 + h
-    elif ha == 'right' and va == 'top':
-        l, r, b, t = x0 - w, x0, y0 - h, y0
-    else:
-        l, r, b, t = x0, x0 + w, y0 - h, y0
-    l = float(np.clip(l, 0.0, 1.0))
-    r = float(np.clip(r, 0.0, 1.0))
-    b = float(np.clip(b, 0.0, 1.0))
-    t = float(np.clip(t, 0.0, 1.0))
-    if r < l:
-        l, r = r, l
-    if t < b:
-        b, t = t, b
-    return l, r, b, t
-
-
-def _best_theta_system_annotation_corner(ax):
-    """
-    Escolhe canto (coords transAxes + ha/va) com menos sobreposição estimada
-    com pontos/linhas; em empate, maximiza distância do âncora ao ponto mais próximo.
-    """
-    candidates = [
-        (0.02, 0.98, 'left', 'top'),
-        (0.98, 0.02, 'right', 'bottom'),
-        (0.02, 0.02, 'left', 'bottom'),
-        (0.98, 0.98, 'right', 'top'),
-    ]
-    ax_pts = _collect_xy_data_axes_norm(ax)
-    if len(ax_pts) == 0:
-        return candidates[0]
-
-    best = candidates[0]
-    best_key = None
-    for x0, y0, ha, va in candidates:
-        l, r, b, top = _text_bbox_axes_fraction(x0, y0, ha, va)
-        n_in = int(
-            np.sum(
-                (ax_pts[:, 0] >= l)
-                & (ax_pts[:, 0] <= r)
-                & (ax_pts[:, 1] >= b)
-                & (ax_pts[:, 1] <= top)
-            )
-        )
-        dmin = float(np.min(np.hypot(ax_pts[:, 0] - x0, ax_pts[:, 1] - y0)))
-        key = (n_in, -dmin)
-        if best_key is None or key < best_key:
-            best_key = key
-            best = (x0, y0, ha, va)
-    return best
-
-
-def place_theta_and_system_annotation(ax, theta, fluid_1, fluid_2, fontsize=18):
-    """Coloca θ + System nos eixos, num canto que evita sobrepor dados."""
-    x0, y0, ha, va = _best_theta_system_annotation_corner(ax)
-    ax.text(
-        x0,
-        y0,
-        theta_and_system_axes_text(theta, fluid_1, fluid_2),
-        transform=ax.transAxes,
-        fontsize=fontsize,
-        fontfamily='serif',
-        ha=ha,
-        va=va,
-    )
-
 
 def read_excel_file(file_path):
     """
@@ -493,7 +479,7 @@ def read_excel_file(file_path):
         # Exibir informações básicas do DataFrame
         print(f"DataFrame carregado: {df.shape[0]} linhas x {df.shape[1]} colunas")
         if direction == 'Downward':
-            theta =-theta
+            theta = -theta
         
         return df, units, sheet_name, fluid_1, fluid_2, theta, False  # False indica que não foi escolhido 'all'
         
@@ -884,14 +870,6 @@ def setup_plot_style():
     })
 
 
-def apply_axis_tick_style_alpha_vs_jg(ax):
-    """
-    Estilo de ticks igual ao de alpha_vs_jg: rótulos major a 18 pt; comprimento
-    dos traços major/minor fica o padrão do matplotlib (sem forçar size).
-    """
-    ax.tick_params(axis='both', which='major', labelsize=18)
-
-
 def apply_subtle_gray_grid(ax):
     """
     Grade cinza discreta por trás dos dados: linhas dos ticks principais um pouco
@@ -926,13 +904,17 @@ def get_flow_pattern_symbols():
     return {
         FLOW_PATTERN_UNCLASSIFIED: {'symbol': 'X', 'color': 'gray'},
         # Padrões encontrados no arquivo Excel atual (análise detalhada)
-        'Annular': {'symbol': 'o', 'color': 'aqua'},              # Annular
-        'Churn': {'symbol': 'h', 'color': 'gold'},               # Churn
-        'Elongated bubble': {'symbol': 'P', 'color': 'lime'}, # Elongated bubble (minúsculo)
-        'Stratified Smooth': {'symbol': 'v', 'color': 'maroon'},                 # Stratified Smooth
-        'Stratified': {'symbol': '^', 'color': 'red'},                    # Stratified
-        'Stratified wavy': {'symbol': '>', 'color': 'orange'},                 # Stratified Wavy
-        'Slug': {'symbol': 's', 'color': 'limegreen'},            # Slug
+        'Annular': {'symbol': '^', 'color': 'green'},                            # Annular
+        'Falling Film': {'symbol': 'v', 'color': 'lime'},                        # Falling Film
+        'Stratified Smooth': {'symbol': 's', 'color': 'purple'},                 # Stratified Smooth
+        'Stratified Wavy': {'symbol': 'D', 'color': 'darkorchid'},               # Stratified Wavy
+        'Rolling Wave':  {'symbol': 'd', 'color': 'violet'},                     # Rolling Wave
+        'Stratified with Mixed Interface': {'symbol': 'p', 'color': 'magenta'},  # ST&MI
+        'Slug': {'symbol': 'o', 'color': 'red'},                                 # Slug
+        'Pseudo-Slug': {'symbol': 'h', 'color': 'firebrick'},                    # Pseudo-slug
+        'Churn': {'symbol': 'X', 'color': 'gold'},                               # Churn
+        'Dual-Continuous': {'symbol': '*', 'color': 'black'},                    # Dual-continuous
+        'Dispersed Bubbles': {'symbol': 'P', 'color': 'blue'},                   #Dispersed Bubbles
     }
 
 
@@ -977,6 +959,59 @@ def _one_col_series_masked(df, mask, col_name):
     return block
 
 
+def _measured_jl_for_legend_series(df_plot, jl_col):
+    """Valores de j_L da planilha: ``jL_raw`` se existir, senão a coluna canónica ``jl_col``."""
+    if 'jL_raw' in df_plot.columns:
+        return pd.to_numeric(_one_col_series(df_plot, 'jL_raw'), errors='coerce')
+    return pd.to_numeric(_one_col_series(df_plot, jl_col), errors='coerce')
+
+
+def _cluster_measured_jl_legend_labels(df_plot, jl_col, tolerance_abs=None):
+    """
+    Agrupa valores distintos de j_L medidos «próximos» (|v − média do grupo| ≤ tolerância),
+    sobre valores únicos ordenados. Por linha define ``_jl_legend_group_mean``: média do grupo,
+    arredondada a 2 casas decimais — sem usar níveis impostos pela padronização.
+    """
+    if tolerance_abs is None:
+        tolerance_abs = JL_LEGEND_CLUSTER_TOLERANCE_ABS
+    jl_meas = _measured_jl_for_legend_series(df_plot, jl_col)
+    arr = jl_meas.to_numpy(dtype=float)
+    u = np.sort(np.unique(arr[np.isfinite(arr)]))
+    if u.size == 0:
+        df_plot['_jl_legend_group_mean'] = np.nan
+        return
+    groups = []
+    cur = [float(u[0])]
+    for i in range(1, len(u)):
+        v = float(u[i])
+        if abs(v - float(np.mean(cur))) <= tolerance_abs:
+            cur.append(v)
+        else:
+            groups.append(cur)
+            cur = [v]
+    groups.append(cur)
+    val_to_label = {}
+    for g in groups:
+        lbl = round(float(np.mean(g)), 2)
+        for x in g:
+            val_to_label[float(x)] = lbl
+    out = []
+    for x in jl_meas:
+        if not np.isfinite(x):
+            out.append(np.nan)
+            continue
+        xf = float(x)
+        lbl = None
+        for k, lab in val_to_label.items():
+            if abs(k - xf) <= 1e-9:
+                lbl = lab
+                break
+        if lbl is None:
+            lbl = round(xf, 2)
+        out.append(lbl)
+    df_plot['_jl_legend_group_mean'] = out
+
+
 def _assign_numeric_to_first_named_column(df, col_name, numeric_series):
     """Escreve numeric_series na primeira coluna de df cujo nome é col_name (evita duplicados)."""
     idxs = [i for i, c in enumerate(df.columns) if c == col_name]
@@ -998,13 +1033,29 @@ PLOT_SAVEFIG_KWARGS = {
 # Proporção comum a todos os gráficos (largura : altura = 12 : 9)
 PLOT_FIGSIZE = (12, 9)
 
+# Tolerância para agrupar j_L medidos próximos nas legendas [m/s] (sem níveis impostos)
+JL_LEGEND_CLUSTER_TOLERANCE_ABS = 0.05
+
+# Fallback de limites log (matriz j_L vs j_G) só quando não há dados positivos finitos
+JL_JG_FLOW_MATRIX_LOG_FALLBACK = (1e-2, 1e2)
+
+# Se o máximo de j_L nos dados for inferior a este valor [m/s], o limite superior do eixo Y
+# (escala log) não fica abaixo deste valor — evita eixo Y demasiado “curto” na matriz log.
+JL_JG_FLOW_MATRIX_LOG_Y_CAP_MIN = 3.0
+
+# Margem relativa ao máximo antes de subir ao próximo tick «nice» (1–2–5–10) no modo compacto
+LOG_AXIS_COMPACT_MARGIN_HI_REL = 0.03
+
+# Lado de cada painel do mosaico (polegadas), para caixas de eixos quadradas
+MOSAIC_JL_JG_PANEL_IN = 4.25
+
 # Eixo Y — gradiente friccional / total [kPa/m] (mesmo padrão em todos os plots).
 # Matplotlib mathtext não suporta \Big; \left/\right são equivalentes e válidos.
 YLABEL_DP_DZ_F = (
-    r'$\left(- \frac{dP}{dz}\right)_\text{f} \; \left[\frac{\mathrm{kPa}}{\mathrm{m}}\right]$'
+    r'$- \left(\frac{\text{dP}}{\text{dz}}\right)_\text{f} \; \left[\frac{\mathrm{kPa}}{\mathrm{m}}\right]$'
 )
 YLABEL_DP_DZ_T = (
-    r'$\left(- \frac{dP}{dz}\right)_\text{t} \; \left[\frac{\mathrm{kPa}}{\mathrm{m}}\right]$'
+    r'$- \left(\frac{\text{dP}}{\text{dz}}\right)_\text{t} \; \left[\frac{\mathrm{kPa}}{\mathrm{m}}\right]$'
 )
 
 
@@ -1035,10 +1086,7 @@ def _apply_mean_experimental_column_aliases(col_mapping):
 
 def build_column_mapping(df):
     """Mapeia nome de coluna normalizado (strip) → coluna original do DataFrame."""
-    col_mapping = {}
-    for col in df.columns:
-        if pd.notna(col):
-            col_mapping[str(col).strip()] = col
+    col_mapping = _base_strip_column_mapping(df)
     _apply_mean_experimental_column_aliases(col_mapping)
     return col_mapping
 
@@ -1229,26 +1277,16 @@ def finalize_jg_plot_xlim(ax):
     ax.set_xlim(0.0, float(x_hi))
 
 
-def apply_dpdz_yaxis_tick_locators_small_scale(ax, *, y_top_threshold_kpa_m=1.5):
+def configure_linear_jg_axis_tick_locators(ax, jg_values):
     """
-    Gradientes ∂P/∂z (eixo Y em kPa/m): se o limite superior Y for estritamente
-    inferior a y_top_threshold_kpa_m (padrão 1,5), usa major 0,2 e minor 0,1;
-    caso contrário não altera os localizadores já definidos no eixo Y.
+    Eixo X em j_g (m/s), escala linear. Se o maior j_g for positivo e ≤ 2 (inclui máximos
+    abaixo de 1 m/s e entre 1 e 2 m/s), major = 0,5 e minor = 0,25; caso contrário
+    major = 1 e minor = 0,5.
     """
-    _y_top = ax.get_ylim()[1]
-    if _y_top < float(y_top_threshold_kpa_m):
-        ax.yaxis.set_major_locator(MultipleLocator(0.2))
-        ax.yaxis.set_minor_locator(MultipleLocator(0.1))
-
-
-def apply_jg_xaxis_tick_locators(ax, *, jg_max_threshold=5.0):
-    """
-    Eixo X (j_g): se o máximo dos dados plotados for < jg_max_threshold,
-    ticks principais a cada 0,5 e secundários a cada 0,25; caso contrário 1,0 e 0,5.
-    """
-    xs = _x_values_from_ax_artists(ax, positive_only=False)
-    jg_max = 0.0 if not xs else float(max(xs))
-    if jg_max < float(jg_max_threshold):
+    arr = np.asarray(jg_values, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    jg_max = float(np.max(arr)) if arr.size > 0 else float('nan')
+    if np.isfinite(jg_max) and jg_max > 0 and jg_max <= 2.0:
         ax.xaxis.set_major_locator(MultipleLocator(0.5))
         ax.xaxis.set_minor_locator(MultipleLocator(0.25))
     else:
@@ -1258,8 +1296,9 @@ def apply_jg_xaxis_tick_locators(ax, *, jg_max_threshold=5.0):
 
 def _re_sg_log_x_limits_from_artists(ax, *, fallback=(1000.0, 250000.0)):
     """
-    Limites do eixo X em escala log(Re_sg): inferior = 10^floor(log10(min)),
-    superior = 10^ceil(log10(max)), só com dados > 0.
+    Limites do eixo X em escala log(Re_sg): mesma lógica compacta que
+    ``_log_axis_compact_limits`` (inferior = potência de 10 abaixo do mínimo;
+    superior ponderado em relação à década), só com dados > 0.
     """
     xs = _x_values_from_ax_artists(ax, positive_only=True)
     if not xs:
@@ -1267,11 +1306,7 @@ def _re_sg_log_x_limits_from_artists(ax, *, fallback=(1000.0, 250000.0)):
     rmin, rmax = min(xs), max(xs)
     if rmin <= 0 or rmax <= 0:
         return fallback
-    lo = 10.0 ** np.floor(np.log10(rmin))
-    hi = 10.0 ** np.ceil(np.log10(rmax))
-    if hi <= lo:
-        hi = lo * 10.0
-    return float(lo), float(hi)
+    return _log_axis_compact_limits(xs, fallback=fallback)
 
 
 def style_axes_re_g_log_x(
@@ -1282,8 +1317,10 @@ def style_axes_re_g_log_x(
     y_lim_top=None,
 ):
     """
-    Eixo X em log(Re_sg): limite inferior 10^floor(log10(min x)), superior 10^ceil(log10(max x))
-    (só pontos com Re_sg > 0; sem dados mantém 10³–2,5×10⁵). Eixo Y linear.
+    Eixo X em log(Re_sg): limites compactos (``_log_axis_compact_limits``): inferior =
+    potência de 10 abaixo do mínimo; superior conforme proximidade à próxima década.
+    Só pontos com Re_sg > 0; sem dados mantém o fallback 10³–2,5×10⁵. Eixo Y linear com
+    rótulos numéricos a 1 casa decimal.
 
     y_lim_bottom / y_lim_top: None = não alterar esse limite (mantém autoscale após o plot).
     Para dp/dz total, não fixar y inferior: valores podem ser negativos (ex. tubos inclinados).
@@ -1301,11 +1338,12 @@ def style_axes_re_g_log_x(
             y1 = y_lim_top
         ax.set_ylim(y0, y1)
     ax.set_xscale('log')
+    ax.yaxis.set_major_formatter(FuncFormatter(_axis_tick_decimal_linear))
     x_lo, x_hi = _re_sg_log_x_limits_from_artists(ax)
     ax.set_xlim(x_lo, x_hi)
-    apply_axis_tick_style_alpha_vs_jg(ax)
-    for lb in ax.get_xticklabels() + ax.get_yticklabels():
-        lb.set_fontfamily('serif')
+    ax.tick_params(axis='both', which='major', labelsize=18, size=8)
+    ax.tick_params(axis='both', which='minor', labelsize=18, size=6)
+    _set_ticklabels_font_serif(ax)
     apply_subtle_gray_grid(ax)
 
 
@@ -1340,6 +1378,59 @@ def re_sl_legend_handles_from_meta(legend_series_meta):
     return out
 
 
+def _legend_grid_placeholder_handle():
+    """Handle invisível para ocupar células na grelha da legenda (alinhamento por ncol)."""
+    return LegendGridPlaceholder()
+
+
+def combine_legend_handles_reynolds_block_first(
+    reynolds_handles,
+    tail_handles,
+    *,
+    ncol=LEGEND_TOP_NCOL,
+):
+    """
+    Coloca os handles da primeira lista (``Re_{sl}``, ``Re_{sg}``, ``J_l``, etc.)
+    nas primeira(s) linha(s) da grelha da legenda (``ncol`` colunas); as entradas
+    seguintes (ex.: flow patterns ou linha ``\\alpha=\\beta``) ocupam as linhas
+    posteriores.
+
+    O matplotlib constrói colunas empilhando blocos contíguos da lista linear de handles;
+    por isso é necessário converter uma grelha **linha a linha** para a ordem linear que
+    o legend usa (preencimento por colunas / ordem Fortran da matriz).
+    """
+
+    def _rows_from_handles(handles):
+        if not handles:
+            return []
+        h = list(handles)
+        rows = []
+        for i in range(0, len(h), ncol):
+            chunk = h[i : i + ncol]
+            if len(chunk) < ncol:
+                chunk = chunk + [_legend_grid_placeholder_handle()] * (ncol - len(chunk))
+            rows.append(chunk)
+        return rows
+
+    r_rows = _rows_from_handles(reynolds_handles)
+    t_rows = _rows_from_handles(tail_handles)
+    if not r_rows:
+        all_rows = t_rows
+    elif not t_rows:
+        all_rows = r_rows
+    else:
+        all_rows = r_rows + t_rows
+
+    if not all_rows:
+        return []
+
+    linear = []
+    for c in range(ncol):
+        for r in range(len(all_rows)):
+            linear.append(all_rows[r][c])
+    return linear
+
+
 def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
     """
     Gera um plot científico de jG vs α, onde cada jL é uma série diferente.
@@ -1371,23 +1462,22 @@ def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         alpha_col = col_mapping['α']
         flow_pattern_col = col_mapping['Flow Pattern']
         
-        # Agrupar dados por jL (arredondando para 1 casa decimal para agrupar séries similares)
+        # Agrupar séries por j_L medido (valores próximos → média com 2 d.p.; ver _cluster_measured_jl_legend_labels)
         df_plot = df.copy().reset_index(drop=True)
         # Garantir α numérico (NAS pode trazer como string; colunas duplicadas → 1ª coluna)
         _assign_numeric_to_first_named_column(df_plot, alpha_col, _one_col_series(df_plot, alpha_col))
-        df_plot['jL_rounded'] = _one_col_series(df_plot, jl_col).round(1)
-        
-        # Obter séries únicas de jL
-        jl_series = sorted(df_plot['jL_rounded'].unique())
+        _cluster_measured_jl_legend_labels(df_plot, jl_col)
+        jl_series = sorted(df_plot['_jl_legend_group_mean'].dropna().unique())
         jl_series = [jl for jl in jl_series if pd.notna(jl)]
         
-        print(f"Séries de jL encontradas: {jl_series}")
+        print(f"Séries de jL encontradas (médias por grupo de valores medidos próximos): {jl_series}")
 
         line_styles, _ = get_series_line_and_marker_styles()
         flow_pattern_symbols = get_flow_pattern_symbols()
 
-        for i, jl in enumerate(jl_series):
-            mask = df_plot['jL_rounded'] == jl
+        for i, jl_lbl in enumerate(jl_series):
+            mask = df_plot['_jl_legend_group_mean'] == jl_lbl
+            jl_disp = float(jl_lbl)
 
             jg_data = _one_col_series_masked(df_plot, mask, jg_col)
             alpha_data = _one_col_series_masked(df_plot, mask, alpha_col)
@@ -1425,7 +1515,7 @@ def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
                     
                 
                 
-                print(f"Plotando série jL = {jl:.1f} m/s com {len(jg_clean)} pontos")
+                print(f"Plotando série jL = {jl_disp:.2f} m/s com {len(jg_clean)} pontos")
 
         legend_elements = flow_pattern_legend_handles(
             df_plot, flow_pattern_col, flow_pattern_symbols
@@ -1442,23 +1532,27 @@ def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         
         # Configurar ticks menores para grade mais detalhada
         ax.minorticks_on()
-        
-        # Configurar espaçamento dos ticks principais (Y); X conforme j_g máximo
+
+        jg_vals = pd.to_numeric(_one_col_series(df_plot, jg_col), errors='coerce').to_numpy()
+        configure_linear_jg_axis_tick_locators(ax, jg_vals)
+
         ax.yaxis.set_major_locator(MultipleLocator(0.1))
-        
+
+        # Configurar espaçamento dos ticks menores
         # ax.yaxis.set_minor_locator(MultipleLocator(0.05))
         
         ax.set_ylim(bottom=0, top=1)
         
-        apply_axis_tick_style_alpha_vs_jg(ax)
-        for label in ax.get_xticklabels() + ax.get_yticklabels():
-            label.set_fontfamily('serif')
+        # Configurar tamanho dos ticks com fonte acadêmica
+        ax.tick_params(axis='both', which='major', labelsize=18)
+        _set_ticklabels_font_serif(ax)
         apply_subtle_gray_grid(ax)
+        _apply_linear_axes_one_decimal_format(ax)
         finalize_jg_plot_xlim(ax)
-        apply_jg_xaxis_tick_locators(ax)
 
         jl_legend_elements = []
-        for i, jl in enumerate(jl_series):
+        for i, jl_lbl in enumerate(jl_series):
+            jl_disp = float(jl_lbl)
             line_style = line_styles[i % len(line_styles)]
             jl_legend_elements.append(
                 plt.Line2D(
@@ -1467,15 +1561,26 @@ def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
                     color='black',
                     linestyle=line_style,
                     linewidth=1.5,
-                    label=rf'$J_{{l}}$ = {jl:.1f} m/s',
+                    label=rf'$J_{{l}}$ = {jl_disp:.2f} m/s',
                 )
             )
         ax.legend(
-            handles=jl_legend_elements + legend_elements,
+            handles=combine_legend_handles_reynolds_block_first(
+                jl_legend_elements, legend_elements
+            ),
             ncol=LEGEND_TOP_NCOL,
             **LEGEND_TOP_KWARGS,
         )
-        place_theta_and_system_annotation(ax, theta, fluid_1, fluid_2)
+        ax.text(
+            0.97,
+            0.03,
+            rf'$\theta = {theta}^\circ$',
+            transform=ax.transAxes,
+            fontsize=20,
+            fontfamily='serif',
+            ha='right',
+            va='bottom',
+        )
 
         plt.tight_layout()
         save_figure_to_sheet_dir(f'{sheet_name}_alpha_vs_jg', sheet_name)
@@ -1484,6 +1589,697 @@ def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         print(f"Erro ao gerar plot: {e}")
         import traceback
         traceback.print_exc()
+
+
+def generate_alpha_vs_beta_homogeneous_parity_plot(df, sheet_name, fluid_1, fluid_2, theta):
+    """
+    Gráfico de paridade: fração de vazio experimental (α) vs modelo homogêneo
+    β = j_g / (j_g + j_l). Inclui a linha α = β e marcadores por flow pattern.
+
+    Destina-se ao caso de **uma única inclinação** (uma aba); não é usado no modo
+    multi-abas ou com a opção 'all'.
+    """
+    try:
+        available_cols = list(df.columns)
+        col_mapping = build_column_mapping(df)
+        if not ensure_alpha_in_column_mapping(col_mapping, available_cols):
+            print('Paridade α vs β: coluna α (void fraction) ausente.')
+            print(f'Colunas disponíveis: {list(col_mapping.keys())}')
+            return
+        miss = missing_column_keys(col_mapping, ['jG', 'jL', 'Flow Pattern'])
+        if miss:
+            print(f'Paridade α vs β: colunas ausentes {miss}')
+            print(f'Colunas disponíveis: {list(col_mapping.keys())}')
+            return
+
+        setup_plot_style()
+        df_plot = df.copy().reset_index(drop=True)
+        jl_col = col_mapping['jL']
+        jg_col = col_mapping['jG']
+        alpha_col = col_mapping['α']
+        flow_pattern_col = col_mapping['Flow Pattern']
+
+        _assign_numeric_to_first_named_column(
+            df_plot, alpha_col, _one_col_series(df_plot, alpha_col)
+        )
+        jg_arr = pd.to_numeric(_one_col_series(df_plot, jg_col), errors='coerce').to_numpy(
+            dtype=float
+        )
+        jl_src = 'jL_raw' if 'jL_raw' in df_plot.columns else jl_col
+        jl_arr = pd.to_numeric(_one_col_series(df_plot, jl_src), errors='coerce').to_numpy(
+            dtype=float
+        )
+        alpha_arr = pd.to_numeric(_one_col_series(df_plot, alpha_col), errors='coerce').to_numpy(
+            dtype=float
+        )
+        fp_series = _one_col_series(df_plot, flow_pattern_col)
+
+        denom = jg_arr + jl_arr
+        beta_arr = np.divide(
+            jg_arr,
+            denom,
+            out=np.full_like(jg_arr, np.nan, dtype=float),
+            where=(denom > 0) & np.isfinite(denom),
+        )
+
+        valid = (
+            np.isfinite(beta_arr)
+            & np.isfinite(alpha_arr)
+            & np.isfinite(jg_arr)
+            & np.isfinite(jl_arr)
+            & (beta_arr >= 0.0)
+            & (beta_arr <= 1.0)
+        )
+        if not np.any(valid):
+            print(f'Paridade α vs β ({sheet_name}): nenhum ponto válido.')
+            return
+
+        flow_pattern_symbols = get_flow_pattern_symbols()
+        fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
+
+        ax.plot(
+            [0.0, 1.0],
+            [0.0, 1.0],
+            linestyle='--',
+            color='0.35',
+            linewidth=1.2,
+            zorder=1,
+        )
+        parity_handle = plt.Line2D(
+            [0],
+            [0],
+            linestyle='--',
+            color='0.35',
+            linewidth=1.2,
+            label=r'$\alpha = \beta$',
+        )
+
+        for i in range(len(df_plot)):
+            if not valid[i]:
+                continue
+            pd_ = style_for_flow_pattern_cell(fp_series.iloc[i], flow_pattern_symbols)
+            ax.scatter(
+                beta_arr[i],
+                alpha_arr[i],
+                c=pd_['color'],
+                marker=pd_['symbol'],
+                s=100,
+                edgecolors='black',
+                linewidth=1,
+                zorder=2,
+            )
+
+        df_valid = df_plot.loc[valid].copy()
+        legend_fp = flow_pattern_legend_handles(
+            df_valid, flow_pattern_col, flow_pattern_symbols
+        )
+
+        ax.legend(
+            handles=combine_legend_handles_reynolds_block_first(
+                legend_fp, [parity_handle]
+            ),
+            ncol=LEGEND_TOP_NCOL,
+            **LEGEND_TOP_KWARGS,
+        )
+
+        ax.set_xlabel(
+            r'$\beta$ [-]',
+            fontsize=24,
+            fontfamily='serif',
+        )
+        ax.set_ylabel(r'$\alpha$ [-]', fontsize=24, fontfamily='serif')
+        ax.set_xlim(0.0, 1.0)
+        ax.set_ylim(0.0, 1.0)
+        ax.set_aspect('equal', adjustable='box')
+
+        ax.xaxis.set_major_locator(MultipleLocator(0.2))
+        ax.yaxis.set_major_locator(MultipleLocator(0.2))
+        ax.minorticks_on()
+
+        ax.tick_params(axis='both', which='major', labelsize=18)
+        _set_ticklabels_font_serif(ax)
+        apply_subtle_gray_grid(ax)
+
+        _apply_linear_axes_one_decimal_format(ax)
+
+        ax.text(
+            0.97,
+            0.03,
+            rf'$\theta = {theta}^\circ$',
+            transform=ax.transAxes,
+            fontsize=20,
+            fontfamily='serif',
+            ha='right',
+            va='bottom',
+        )
+
+        plt.tight_layout()
+        save_figure_to_sheet_dir(f'{sheet_name}_alpha_vs_beta_homogeneous_parity', sheet_name)
+        print(f'Paridade α vs β ({sheet_name}): {int(np.sum(valid))} pontos.')
+
+    except Exception as e:
+        print(f'Erro ao gerar paridade α vs β: {e}')
+        import traceback
+        traceback.print_exc()
+
+
+def _jl_jg_linear_axis_limits(arr, margin_frac=0.05):
+    """
+    Limites lineares: faixa dos dados + margem, arredondada para fora em passos
+    “redondos” (mesma ordem de grandeza que o intervalo).
+    """
+    v = np.asarray(arr, dtype=float)
+    v = v[np.isfinite(v)]
+    if v.size == 0:
+        return None, None
+    lo, hi = float(v.min()), float(v.max())
+    span = hi - lo
+    if span <= 0:
+        eps = max(abs(lo), 1e-12) * 0.1
+        lo, hi = lo - eps, hi + eps
+        span = hi - lo
+    a, b = lo - margin_frac * span, hi + margin_frac * span
+    rng = b - a
+    exp = np.floor(np.log10(max(rng, 1e-30)))
+    base_step = 10.0**exp
+    for mult in (0.2, 0.5, 1.0, 2.0, 5.0, 10.0):
+        step = base_step * mult
+        if rng / step <= 14:
+            break
+    else:
+        step = base_step
+    lower = np.floor(a / step) * step
+    upper = np.ceil(b / step) * step
+    if upper <= lower:
+        upper = lower + step
+    return lower, upper
+
+
+def _log_axis_compact_hi(rmax: float, *, margin_hi_rel: float) -> float:
+    """
+    Limite superior compacto para escala log: dentro de cada década [L, 10L),
+    usa o menor entre {2L, 5L, 10L} que ainda cobre rmax com margem relativa.
+
+    Isto reproduz o comportamento desejado (ex.: 1.2→2, 3.5→5, 7.5→10, 12→20, 85→100)
+    sem estender sempre até à próxima potência de 10 inteira.
+    """
+    r_eff = rmax * (1.0 + margin_hi_rel)
+    if not np.isfinite(r_eff) or r_eff <= 0:
+        return float('nan')
+    L = 10.0 ** np.floor(np.log10(r_eff))
+    for mult in (3.0, 5.0, 10.0):
+        cand = mult * L
+        if cand + 1e-15 * max(cand, 1.0) >= r_eff:
+            return float(cand)
+    return float(10.0 * L)
+
+
+def _log_axis_compact_limits(
+    values,
+    *,
+    margin_hi_rel=None,
+    fallback=None,
+):
+    """
+    Limites em escala logarítmica compactos para matplotlib (loglog / eixo X log).
+
+    Inferior: ``10**floor(log10(min))`` — potência de 10 imediatamente abaixo do menor
+    valor > 0 (ex.: min 0,15 → 0,1; min 0,05 → 0,01).
+
+    Superior: menor valor da forma k·L com k ∈ {2, 5, 10} e
+    ``L = 10**floor(log10(rmax*(1+margin)))`` tal que ainda cubra o máximo com margem;
+    assim valores longe do topo da década não abrem o eixo até à década seguinte.
+    """
+    if margin_hi_rel is None:
+        margin_hi_rel = LOG_AXIS_COMPACT_MARGIN_HI_REL
+    if fallback is None:
+        fallback = JL_JG_FLOW_MATRIX_LOG_FALLBACK
+
+    arr = np.asarray(values, dtype=float)
+    arr = arr[np.isfinite(arr) & (arr > 0)]
+    if arr.size == 0:
+        return float(fallback[0]), float(fallback[1])
+
+    rmin = float(arr.min())
+    rmax = float(arr.max())
+    lo = 10.0 ** np.floor(np.log10(rmin))
+    hi = _log_axis_compact_hi(rmax, margin_hi_rel=margin_hi_rel)
+
+    if not np.isfinite(hi) or hi <= lo:
+        hi = lo * 10.0
+    return float(lo), float(hi)
+
+
+def _jl_jg_flow_pattern_matrix_log_ylim_cap(jl_v: np.ndarray, y_lo: float, y_hi: float):
+    """
+    Matriz j_L vs j_G em escala log: se max(j_L) < ``JL_JG_FLOW_MATRIX_LOG_Y_CAP_MIN``,
+    garante que o limite superior em Y seja pelo menos esse valor.
+    """
+    if jl_v.size == 0:
+        return y_lo, y_hi
+    jl_max = float(np.max(jl_v))
+    if np.isfinite(jl_max) and jl_max < JL_JG_FLOW_MATRIX_LOG_Y_CAP_MIN:
+        return y_lo, max(float(y_hi), JL_JG_FLOW_MATRIX_LOG_Y_CAP_MIN)
+    return y_lo, y_hi
+
+
+def _axis_tick_decimal_log(x, pos):
+    """Ticks em escala log com valores numéricos decimais (sem potências no eixo)."""
+    if not np.isfinite(x) or x <= 0:
+        return ''
+    return f'{x:g}'
+
+
+def _axis_tick_decimal_linear(x, pos):
+    """Ticks em escala linear com 1 casa decimal."""
+    if not np.isfinite(x):
+        return ''
+    return f'{x:.1f}'
+
+
+def _apply_linear_axes_one_decimal_format(ax):
+    """Formata números dos eixos X e Y com 1 casa decimal (escala linear)."""
+    fmt = FuncFormatter(_axis_tick_decimal_linear)
+    ax.xaxis.set_major_formatter(fmt)
+    ax.yaxis.set_major_formatter(fmt)
+
+
+def _jl_jg_matrix_load_valid_series(df):
+    """
+    Extrai j_G, j_L e flow pattern por ponto (apenas j_G, j_L > 0).
+    Usa j_L direto da planilha: coluna ``jL_raw`` se existir (antes de médias de cluster),
+    senão a coluna canónica de jL.
+    Retorna dict com arrays e df para legenda, ou (None, lista de chaves em falta).
+    """
+    col_mapping = build_column_mapping(df)
+    miss = missing_column_keys(col_mapping, ['jG', 'jL', 'Flow Pattern'])
+    if miss:
+        return None, miss
+    df_plot = df.copy().reset_index(drop=True)
+    jl_col = col_mapping['jL']
+    jg_col = col_mapping['jG']
+    flow_pattern_col = col_mapping['Flow Pattern']
+    jl_series_col = 'jL_raw' if 'jL_raw' in df_plot.columns else jl_col
+    jg_data = pd.to_numeric(_one_col_series(df_plot, jg_col), errors='coerce')
+    jl_data = pd.to_numeric(_one_col_series(df_plot, jl_series_col), errors='coerce')
+    fp_data = _one_col_series(df_plot, flow_pattern_col)
+    valid = (
+        pd.notna(jg_data)
+        & pd.notna(jl_data)
+        & (jg_data > 0)
+        & (jl_data > 0)
+    )
+    if valid.sum() == 0:
+        return None, None
+    return {
+        'jg_v': jg_data[valid].to_numpy(dtype=float),
+        'jl_v': jl_data[valid].to_numpy(dtype=float),
+        'fp_v': fp_data[valid],
+        'df_leg': df_plot.loc[valid].copy(),
+        'flow_pattern_col': flow_pattern_col,
+    }, None
+
+
+def _decorate_jl_jg_matrix_subplot(
+    ax,
+    theta,
+    *,
+    show_xlabel: bool,
+    show_ylabel: bool,
+):
+    """Painel do mosaico: sem legenda local; rótulos só onde solicitado."""
+    if show_xlabel:
+        ax.set_xlabel(r'$J_{g}$ [m/s]', fontsize=20, fontfamily='serif')
+    else:
+        ax.set_xlabel('')
+    if show_ylabel:
+        ax.set_ylabel(r'$J_{l}$ [m/s]', fontsize=20, fontfamily='serif')
+    else:
+        ax.set_ylabel('')
+    ax.set_axisbelow(True)
+    ax.tick_params(axis='both', which='major', labelsize=14)
+    ax.tick_params(axis='both', which='minor', labelsize=11)
+    _set_ticklabels_font_serif(ax)
+    apply_subtle_gray_grid(ax)
+    ax.text(
+        0.97,
+        0.03,
+        rf'$\theta = {theta}^\circ$',
+        transform=ax.transAxes,
+        fontsize=16,
+        fontfamily='serif',
+        ha='right',
+        va='bottom',
+    )
+
+
+def _finalize_jl_jg_matrix_axes(ax, *, legend_elements, theta):
+    """Rótulos, legenda e anotação de inclinação comuns aos dois modos (log / linear)."""
+    ax.set_xlabel(r'$J_{g}$ [m/s]', fontsize=24, fontfamily='serif')
+    ax.set_ylabel(r'$J_{l}$ [m/s]', fontsize=24, fontfamily='serif')
+    ax.set_axisbelow(True)
+    ax.tick_params(axis='both', which='major', labelsize=18)
+    ax.tick_params(axis='both', which='minor', labelsize=14)
+    _set_ticklabels_font_serif(ax)
+    apply_subtle_gray_grid(ax)
+    if legend_elements:
+        ax.legend(
+            handles=legend_elements,
+            ncol=LEGEND_TOP_NCOL,
+            **LEGEND_TOP_KWARGS,
+        )
+    ax.text(
+        0.97,
+        0.03,
+        rf'$\theta = {theta}^\circ$',
+        transform=ax.transAxes,
+        fontsize=20,
+        fontfamily='serif',
+        ha='right',
+        va='bottom',
+    )
+
+
+def generate_jl_vs_jg_flow_pattern_matrix_plot(df, sheet_name, fluid_1, fluid_2, theta):
+    """
+    Matriz experimental j_L vs j_G: gera dois gráficos com os mesmos pontos —
+    (1) escalas logarítmicas e (2) escalas lineares — com marcadores por padrão de escoamento.
+
+    Destina-se ao modo em que não se usa a opção 'all' no carregamento (uma ou mais
+    abas escolhidas manualmente); não é chamada quando `is_all_selected` é True.
+    """
+    try:
+        col_mapping = build_column_mapping(df)
+        miss = missing_column_keys(col_mapping, ['jG', 'jL', 'Flow Pattern'])
+        if miss:
+            print(f'Colunas ausentes para matriz j_L vs j_G: {miss}')
+            print(f'Colunas disponíveis: {list(col_mapping.keys())}')
+            return
+
+        setup_plot_style()
+        df_plot = df.copy().reset_index(drop=True)
+        jl_col = col_mapping['jL']
+        jg_col = col_mapping['jG']
+        flow_pattern_col = col_mapping['Flow Pattern']
+
+        jg_data = pd.to_numeric(_one_col_series(df_plot, jg_col), errors='coerce')
+        jl_data = pd.to_numeric(_one_col_series(df_plot, jl_col), errors='coerce')
+        fp_data = _one_col_series(df_plot, flow_pattern_col)
+
+        valid = (
+            pd.notna(jg_data)
+            & pd.notna(jl_data)
+            & (jg_data > 0)
+            & (jl_data > 0)
+        )
+        n_skip = int((~valid).sum())
+        if valid.sum() == 0:
+            print(f'Matriz j_L vs j_G ({sheet_name}): nenhum ponto com j_G > 0 e j_L > 0.')
+            return
+        if n_skip:
+            print(
+                f'Matriz j_L vs j_G ({sheet_name}): ignoradas {n_skip} linhas '
+                '(valores não positivos ou inválidos).'
+            )
+
+        flow_pattern_symbols = get_flow_pattern_symbols()
+
+        jg_v = jg_data[valid].to_numpy(dtype=float)
+        jl_v = jl_data[valid].to_numpy(dtype=float)
+        fp_v = fp_data[valid]
+
+        df_leg = df_plot.loc[valid].copy()
+        legend_elements = flow_pattern_legend_handles(
+            df_leg, flow_pattern_col, flow_pattern_symbols
+        )
+
+        def scatter_points(ax):
+            for jg_val, jl_val, fp in zip(jg_v, jl_v, fp_v):
+                pd_ = style_for_flow_pattern_cell(fp, flow_pattern_symbols)
+                symbol = pd_['symbol']
+                color = pd_['color']
+                ax.scatter(
+                    jg_val,
+                    jl_val,
+                    c=color,
+                    marker=symbol,
+                    s=120,
+                    edgecolors='black',
+                    linewidth=1,
+                    zorder=2,
+                )
+
+        # --- Log-log: limites compactos a partir dos dados (igual critério ao mosaico / Re_sg)
+        x_lo, x_hi = _log_axis_compact_limits(jg_v)
+        y_lo, y_hi = _log_axis_compact_limits(jl_v)
+        y_lo, y_hi = _jl_jg_flow_pattern_matrix_log_ylim_cap(jl_v, y_lo, y_hi)
+
+        fig_log, ax_log = plt.subplots(figsize=PLOT_FIGSIZE)
+        scatter_points(ax_log)
+        ax_log.set_xscale('log')
+        ax_log.set_yscale('log')
+        ax_log.set_xlim(x_lo, x_hi)
+        ax_log.set_ylim(y_lo, y_hi)
+        ax_log.xaxis.set_major_formatter(FuncFormatter(_axis_tick_decimal_log))
+        ax_log.yaxis.set_major_formatter(FuncFormatter(_axis_tick_decimal_log))
+        _finalize_jl_jg_matrix_axes(ax_log, legend_elements=legend_elements, theta=theta)
+        plt.tight_layout()
+        save_figure_to_sheet_dir(
+            f'{sheet_name}_jl_vs_jg_flow_pattern_matrix_log', sheet_name
+        )
+        plt.close(fig_log)
+
+        # --- Linear: mesmos pontos; limites “arredondados” para a grandeza mais próxima
+        xl0, xl1 = _jl_jg_linear_axis_limits(jg_v)
+        yl0, yl1 = _jl_jg_linear_axis_limits(jl_v)
+        if xl0 is None or yl0 is None:
+            print(f'Matriz j_L vs j_G ({sheet_name}): não foi possível definir limites lineares.')
+            return
+
+        fig_lin, ax_lin = plt.subplots(figsize=PLOT_FIGSIZE)
+        scatter_points(ax_lin)
+        ax_lin.set_xlim(xl0, xl1)
+        ax_lin.set_ylim(yl0, yl1)
+        ax_lin.xaxis.set_major_formatter(FuncFormatter(_axis_tick_decimal_linear))
+        ax_lin.yaxis.set_major_formatter(FuncFormatter(_axis_tick_decimal_linear))
+        ax_lin.minorticks_on()
+        _finalize_jl_jg_matrix_axes(ax_lin, legend_elements=legend_elements, theta=theta)
+        plt.tight_layout()
+        save_figure_to_sheet_dir(
+            f'{sheet_name}_jl_vs_jg_flow_pattern_matrix_linear', sheet_name
+        )
+        plt.close(fig_lin)
+
+        print(
+            f'Matriz j_L vs j_G ({sheet_name}): {len(jg_v)} pontos — '
+            f'guardados log e linear (limites log [{x_lo:g}, {x_hi:g}] × [{y_lo:g}, {y_hi:g}], '
+            f'linear [{xl0:g}, {xl1:g}] × [{yl0:g}, {yl1:g}]).'
+        )
+
+    except Exception as e:
+        print(f'Erro ao gerar matriz j_L vs j_G: {e}')
+        import traceback
+        traceback.print_exc()
+
+
+def _save_jl_jg_mosaic_figure(fig, base_filename):
+    """PDF/PNG na pasta ``orientation_plots`` junto ao ficheiro Excel (multi-inclinação)."""
+    out_dir = os.path.join(os.path.dirname(file_path), 'orientation_plots')
+    os.makedirs(out_dir, exist_ok=True)
+    pdf_file = os.path.join(out_dir, f'{base_filename}.pdf')
+    png_file = os.path.join(out_dir, f'{base_filename}.png')
+    fig.savefig(pdf_file, **PLOT_SAVEFIG_KWARGS)
+    fig.savefig(png_file, **PLOT_SAVEFIG_KWARGS)
+    print(f'Mosaico guardado: {pdf_file}')
+    print(f'Mosaico guardado: {png_file}')
+
+
+def generate_jl_vs_jg_flow_pattern_matrix_mosaic_plot(all_dataframes, selected_sheets):
+    """
+    Mosaico (2 colunas) das matrizes experimentais j_L vs j_G com flow patterns,
+    uma subfigura por inclinação/aba. Cada painel usa caixa de eixos quadrada
+    (mesmo lado em polegadas); última linha ímpar: painel centralizado,
+    quadrangular e alinhado à largura de uma coluna. Escalas log com limites
+    compactos comuns a todos os painéis (união implícita: min/max sobre todas as abas).
+    Uma única legenda de flow pattern no topo.
+
+    Destinado ao modo em que se escolhe 'all' e várias abas/inclinações para analisar.
+
+    Args:
+        all_dataframes (dict): sheet_name -> DataFrame
+        selected_sheets (list): abas a incluir (normalmente as chaves escolhidas pelo utilizador)
+    """
+    try:
+        names = [s for s in selected_sheets if s in all_dataframes]
+        if len(names) < 2:
+            print(
+                'Mosaico j_L vs j_G: precisa de pelo menos 2 abas/inclinações; ignorado.'
+            )
+            return
+
+        setup_plot_style()
+        flow_pattern_symbols = get_flow_pattern_symbols()
+
+        panels = []
+        for sheet_name in names:
+            df = all_dataframes[sheet_name]
+            pack, miss = _jl_jg_matrix_load_valid_series(df)
+            if pack is None:
+                if miss:
+                    print(
+                        f'Mosaico j_L vs j_G: aba {sheet_name} sem colunas {miss}; ignorada.'
+                    )
+                else:
+                    print(
+                        f'Mosaico j_L vs j_G: aba {sheet_name} sem pontos j_G, j_L > 0; ignorada.'
+                    )
+                continue
+            fluid_1, fluid_2, direction, theta, ID, is_validation = extract_info_from_filename(
+                sheet_name
+            )
+            if direction == 'Downward':
+                theta = -theta
+            panels.append(
+                {
+                    'sheet_name': sheet_name,
+                    'theta': theta,
+                    'jg_v': pack['jg_v'],
+                    'jl_v': pack['jl_v'],
+                    'fp_v': pack['fp_v'],
+                    'df_leg': pack['df_leg'],
+                    'flow_pattern_col': pack['flow_pattern_col'],
+                }
+            )
+
+        if len(panels) < 2:
+            print(
+                'Mosaico j_L vs j_G: menos de 2 abas com dados válidos; mosaico não gerado.'
+            )
+            return
+
+        jg_cat = np.concatenate([p['jg_v'] for p in panels])
+        jl_cat = np.concatenate([p['jl_v'] for p in panels])
+
+        # Limites log iguais em todos os painéis (dados de todas as abas)
+        x_lo, x_hi = _log_axis_compact_limits(jg_cat)
+        y_lo, y_hi = _log_axis_compact_limits(jl_cat)
+        y_lo, y_hi = _jl_jg_flow_pattern_matrix_log_ylim_cap(jl_cat, y_lo, y_hi)
+        xl0, xl1 = _jl_jg_linear_axis_limits(jg_cat)
+        yl0, yl1 = _jl_jg_linear_axis_limits(jl_cat)
+        if xl0 is None or yl0 is None:
+            print('Mosaico j_L vs j_G: não foi possível calcular limites lineares globais.')
+            return
+
+        fp_col = panels[0]['flow_pattern_col']
+        df_leg_all = pd.concat([p['df_leg'] for p in panels], ignore_index=True)
+        legend_handles = flow_pattern_legend_handles(
+            df_leg_all, fp_col, flow_pattern_symbols
+        )
+
+        ncols = 2
+        n = len(panels)
+        nrows = (n + ncols - 1) // ncols
+        panel = MOSAIC_JL_JG_PANEL_IN
+        fig_w = ncols * panel + 1.0
+        fig_h = nrows * panel + 1.45
+
+        def _draw_mosaic(scale_log: bool):
+            fig = plt.figure(figsize=(fig_w, fig_h))
+            gs = GridSpec(nrows, ncols, figure=fig)
+
+            axes_list = []
+            for i in range(n):
+                r, c = divmod(i, ncols)
+                if i == n - 1 and (n % ncols == 1):
+                    inner = GridSpecFromSubplotSpec(
+                        1,
+                        3,
+                        subplot_spec=gs[r, :],
+                        width_ratios=[1, 2, 1],
+                        wspace=0,
+                    )
+                    ax = fig.add_subplot(inner[0, 1])
+                else:
+                    ax = fig.add_subplot(gs[r, c])
+                axes_list.append(ax)
+
+            for i, ax in enumerate(axes_list):
+                p = panels[i]
+                for jg_val, jl_val, fp in zip(p['jg_v'], p['jl_v'], p['fp_v']):
+                    pd_ = style_for_flow_pattern_cell(fp, flow_pattern_symbols)
+                    ax.scatter(
+                        jg_val,
+                        jl_val,
+                        c=pd_['color'],
+                        marker=pd_['symbol'],
+                        s=85,
+                        edgecolors='black',
+                        linewidth=0.9,
+                        zorder=2,
+                    )
+                if scale_log:
+                    ax.set_xscale('log')
+                    ax.set_yscale('log')
+                    ax.set_xlim(x_lo, x_hi)
+                    ax.set_ylim(y_lo, y_hi)
+                    ax.xaxis.set_major_formatter(FuncFormatter(_axis_tick_decimal_log))
+                    ax.yaxis.set_major_formatter(FuncFormatter(_axis_tick_decimal_log))
+                else:
+                    ax.set_xlim(xl0, xl1)
+                    ax.set_ylim(yl0, yl1)
+                    ax.xaxis.set_major_formatter(FuncFormatter(_axis_tick_decimal_linear))
+                    ax.yaxis.set_major_formatter(FuncFormatter(_axis_tick_decimal_linear))
+                    ax.minorticks_on()
+
+                # Caixa do eixo quadrada (mesmo tamanho visual em todos os painéis)
+                ax.set_box_aspect(1)
+
+                r = i // ncols
+                c = i % ncols
+                is_bottom = r == nrows - 1
+                is_left = (c == 0) or (i == n - 1 and (n % ncols == 1))
+                _decorate_jl_jg_matrix_subplot(
+                    ax,
+                    p['theta'],
+                    show_xlabel=is_bottom,
+                    show_ylabel=is_left,
+                )
+
+            if legend_handles:
+                ncol_leg = min(LEGEND_TOP_NCOL, max(1, len(legend_handles)))
+                fig.legend(
+                    handles=legend_handles,
+                    ncol=ncol_leg,
+                    loc='lower center',
+                    bbox_to_anchor=(0.5, 1.0),
+                    frameon=False,
+                    fontsize=14,
+                    prop={'family': 'serif'},
+                )
+
+            # top mais alto aproxima os painéis da legenda (menos faixa branca entre ambos)
+            fig.subplots_adjust(left=0.09, right=0.97, top=0.93, bottom=0.08, hspace=0.38, wspace=0.30)
+            return fig
+
+        fig_log = _draw_mosaic(scale_log=True)
+        _save_jl_jg_mosaic_figure(fig_log, 'mosaic_jl_vs_jg_flow_pattern_matrix_log')
+        plt.close(fig_log)
+
+        fig_lin = _draw_mosaic(scale_log=False)
+        _save_jl_jg_mosaic_figure(fig_lin, 'mosaic_jl_vs_jg_flow_pattern_matrix_linear')
+        plt.close(fig_lin)
+
+        print(
+            f'Mosaico j_L vs j_G: {n} painéis quadrados (log + linear); log '
+            f'[{x_lo:g}, {x_hi:g}] × [{y_lo:g}, {y_hi:g}] — legenda com '
+            f'{len(legend_handles)} padrões.'
+        )
+
+    except Exception as e:
+        print(f'Erro ao gerar mosaico j_L vs j_G: {e}')
+        import traceback
+        traceback.print_exc()
+
 
 def generate_dpdzf_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
     """
@@ -1510,21 +2306,20 @@ def generate_dpdzf_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         dp_dz_f_col = col_mapping['dp/dz_F']
         flow_pattern_col = col_mapping['Flow Pattern']
         
-        # Agrupar dados por jL (arredondando para 1 casa decimal para agrupar séries similares)
+        # Agrupar séries por j_L medido na planilha (valores próximos → média, 2 d.p.)
         df_plot = df.copy().reset_index(drop=True)
-        df_plot['jL_rounded'] = _one_col_series(df_plot, jl_col).round(1)
-        
-        # Obter séries únicas de jL
-        jl_series = sorted(df_plot['jL_rounded'].unique())
+        _cluster_measured_jl_legend_labels(df_plot, jl_col)
+        jl_series = sorted(df_plot['_jl_legend_group_mean'].dropna().unique())
         jl_series = [jl for jl in jl_series if pd.notna(jl)]
         
-        print(f"Séries de jL encontradas: {jl_series}")
+        print(f"Séries de jL encontradas (médias por grupo de valores medidos próximos): {jl_series}")
 
         line_styles, _ = get_series_line_and_marker_styles()
         flow_pattern_symbols = get_flow_pattern_symbols()
 
-        for i, jl in enumerate(jl_series):
-            mask = df_plot['jL_rounded'] == jl
+        for i, jl_lbl in enumerate(jl_series):
+            mask = df_plot['_jl_legend_group_mean'] == jl_lbl
+            jl_disp = float(jl_lbl)
 
             jg_data = _one_col_series_masked(df_plot, mask, jg_col)
             frictional_data = _one_col_series_masked(df_plot, mask, dp_dz_f_col)
@@ -1570,7 +2365,7 @@ def generate_dpdzf_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
                         zorder=2,
                     )
 
-                print(f"Plotando série jL = {jl:.1f} m/s com {len(jg_clean)} pontos")
+                print(f"Plotando série jL = {jl_disp:.2f} m/s com {len(jg_clean)} pontos")
 
         legend_elements = flow_pattern_legend_handles(
             df_plot, flow_pattern_col, flow_pattern_symbols
@@ -1586,24 +2381,25 @@ def generate_dpdzf_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         
         # Configurar ticks menores para grade mais detalhada
         ax.minorticks_on()
-        
-        # Configurar espaçamento dos ticks principais (Y); X conforme j_g máximo
+
+        jg_vals = pd.to_numeric(_one_col_series(df_plot, jg_col), errors='coerce').to_numpy()
+        configure_linear_jg_axis_tick_locators(ax, jg_vals)
         ax.yaxis.set_major_locator(MultipleLocator(0.5))
-        
+
         # ax.yaxis.set_minor_locator(MultipleLocator(0.05))
         
         ax.set_ylim(bottom=0)
         
-        apply_axis_tick_style_alpha_vs_jg(ax)
-        for label in ax.get_xticklabels() + ax.get_yticklabels():
-            label.set_fontfamily('serif')
+        # Configurar tamanho dos ticks com fonte acadêmica
+        ax.tick_params(axis='both', which='major', labelsize=18)
+        _set_ticklabels_font_serif(ax)
         apply_subtle_gray_grid(ax)
+        _apply_linear_axes_one_decimal_format(ax)
         finalize_jg_plot_xlim(ax)
-        apply_jg_xaxis_tick_locators(ax)
-        apply_dpdz_yaxis_tick_locators_small_scale(ax)
 
         jl_legend_elements = []
-        for i, jl in enumerate(jl_series):
+        for i, jl_lbl in enumerate(jl_series):
+            jl_disp = float(jl_lbl)
             line_style = line_styles[i % len(line_styles)]
             jl_legend_elements.append(
                 plt.Line2D(
@@ -1612,16 +2408,26 @@ def generate_dpdzf_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
                     color='black',
                     linestyle=line_style,
                     linewidth=1.5,
-                    label=rf'$J_{{l}}$ = {jl:.1f} m/s',
+                    label=rf'$J_{{l}}$ = {jl_disp:.2f} m/s',
                 )
             )
 
         ax.legend(
-            handles=jl_legend_elements + legend_elements,
+            handles=combine_legend_handles_reynolds_block_first(
+                jl_legend_elements, legend_elements
+            ),
             ncol=LEGEND_TOP_NCOL,
             **LEGEND_TOP_KWARGS,
         )
-        place_theta_and_system_annotation(ax, theta, fluid_1, fluid_2)
+        ax.text(
+            0.03,
+            0.92,
+            rf'$\theta = {theta}^\circ$',
+            transform=ax.transAxes,
+            fontsize=20,
+            fontfamily='serif',
+            verticalalignment='top',
+        )
 
         plt.tight_layout()
         save_figure_to_sheet_dir(f'{sheet_name}_frictional_vs_jg', sheet_name)
@@ -1635,7 +2441,7 @@ def generate_dpdzf_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
 def generate_dpdzt_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
     """
     Gera um plot científico de jG vs (∂P/∂z)_t, com a mesma estrutura de frictional_vs_jg:
-    uma série por jL (arredondado), símbolos por Flow Pattern.
+    uma série por jL (média por grupo arredondada a 2 casas decimais), símbolos por Flow Pattern.
     O eixo Y não é forçado a y ≥ 0 (gradiente total pode ser negativo).
     """
     try:
@@ -1655,18 +2461,19 @@ def generate_dpdzt_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         flow_pattern_col = col_mapping['Flow Pattern']
 
         df_plot = df.copy().reset_index(drop=True)
-        df_plot['jL_rounded'] = _one_col_series(df_plot, jl_col).round(1)
+        _cluster_measured_jl_legend_labels(df_plot, jl_col)
 
-        jl_series = sorted(df_plot['jL_rounded'].unique())
+        jl_series = sorted(df_plot['_jl_legend_group_mean'].dropna().unique())
         jl_series = [jl for jl in jl_series if pd.notna(jl)]
 
-        print(f"[total_vs_jg] Séries de jL encontradas: {jl_series}")
+        print(f"[total_vs_jg] Séries de jL (médias por grupo de valores medidos próximos): {jl_series}")
 
         line_styles, _ = get_series_line_and_marker_styles()
         flow_pattern_symbols = get_flow_pattern_symbols()
 
-        for i, jl in enumerate(jl_series):
-            mask = df_plot['jL_rounded'] == jl
+        for i, jl_lbl in enumerate(jl_series):
+            mask = df_plot['_jl_legend_group_mean'] == jl_lbl
+            jl_disp = float(jl_lbl)
 
             jg_data = _one_col_series_masked(df_plot, mask, jg_col)
             total_data = _one_col_series_masked(df_plot, mask, dp_dz_t_col)
@@ -1711,7 +2518,7 @@ def generate_dpdzt_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
                         zorder=2,
                     )
 
-                print(f"[total_vs_jg] Plotando série jL = {jl:.1f} m/s com {len(jg_clean)} pontos")
+                print(f"[total_vs_jg] Plotando série jL = {jl_disp:.2f} m/s com {len(jg_clean)} pontos")
 
         legend_elements = flow_pattern_legend_handles(
             df_plot, flow_pattern_col, flow_pattern_symbols
@@ -1724,16 +2531,18 @@ def generate_dpdzt_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         ax.set_axisbelow(True)
         ax.minorticks_on()
 
-        apply_axis_tick_style_alpha_vs_jg(ax)
-        for label in ax.get_xticklabels() + ax.get_yticklabels():
-            label.set_fontfamily('serif')
+        jg_vals = pd.to_numeric(_one_col_series(df_plot, jg_col), errors='coerce').to_numpy()
+        configure_linear_jg_axis_tick_locators(ax, jg_vals)
+
+        ax.tick_params(axis='both', which='major', labelsize=18)
+        _set_ticklabels_font_serif(ax)
         apply_subtle_gray_grid(ax)
+        _apply_linear_axes_one_decimal_format(ax)
         finalize_jg_plot_xlim(ax)
-        apply_jg_xaxis_tick_locators(ax)
-        apply_dpdz_yaxis_tick_locators_small_scale(ax)
 
         jl_legend_elements = []
-        for i, jl in enumerate(jl_series):
+        for i, jl_lbl in enumerate(jl_series):
+            jl_disp = float(jl_lbl)
             line_style = line_styles[i % len(line_styles)]
             jl_legend_elements.append(
                 plt.Line2D(
@@ -1742,16 +2551,26 @@ def generate_dpdzt_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
                     color='black',
                     linestyle=line_style,
                     linewidth=1.5,
-                    label=rf'$J_{{l}}$ = {jl:.1f} m/s',
+                    label=rf'$J_{{l}}$ = {jl_disp:.2f} m/s',
                 )
             )
 
         ax.legend(
-            handles=jl_legend_elements + legend_elements,
+            handles=combine_legend_handles_reynolds_block_first(
+                jl_legend_elements, legend_elements
+            ),
             ncol=LEGEND_TOP_NCOL,
             **LEGEND_TOP_KWARGS,
         )
-        place_theta_and_system_annotation(ax, theta, fluid_1, fluid_2)
+        ax.text(
+            0.03,
+            0.92,
+            rf'$\theta = {theta}^\circ$',
+            transform=ax.transAxes,
+            fontsize=20,
+            fontfamily='serif',
+            verticalalignment='top',
+        )
 
         plt.tight_layout()
         save_figure_to_sheet_dir(f'{sheet_name}_total_vs_jg', sheet_name)
@@ -1866,20 +2685,31 @@ def generate_alpha_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
             df_plot, flow_pattern_col, flow_pattern_symbols
         )
 
-        ax.set_xlabel(r'$Re_{sg}$', fontsize=24, fontfamily='serif')
+        ax.set_xlabel(r'$Re_{sg}$ [-]', fontsize=24, fontfamily='serif')
         ax.set_ylabel(r'$\alpha$ [-]', fontsize=24, fontfamily='serif')
         style_axes_re_g_log_x(ax, y_major_step=0.1, y_lim_bottom=0, y_lim_top=1.0)
 
         Re_sl_legend_elements = re_sl_legend_handles_from_meta(legend_series_meta)
 
-        combined_leg = Re_sl_legend_elements + legend_elements
+        combined_leg = combine_legend_handles_reynolds_block_first(
+            Re_sl_legend_elements, legend_elements
+        )
         if combined_leg:
             ax.legend(
                 handles=combined_leg,
                 ncol=LEGEND_TOP_NCOL,
                 **LEGEND_TOP_KWARGS,
             )
-        place_theta_and_system_annotation(ax, theta, fluid_1, fluid_2)
+        ax.text(
+            0.97,
+            0.03,
+            rf'$\theta = {theta}^\circ$',
+            transform=ax.transAxes,
+            fontsize=20,
+            fontfamily='serif',
+            ha='right',
+            va='bottom',
+        )
 
         plt.tight_layout()
         save_figure_to_sheet_dir(f'{sheet_name}_alpha_vs_Re_g', sheet_name)
@@ -1915,19 +2745,18 @@ def generate_dpdzf_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         dp_dz_f_col = col_mapping['dp/dz_F']
         flow_pattern_col = col_mapping['Flow Pattern']
         
-        # Primeiro agrupar dados por jL (arredondando para 1 casa decimal para agrupar séries similares)
-        df_plot = df.copy().reset_index(drop=True)
-        df_plot['jL_rounded'] = _one_col_series(df_plot, jl_col).round(1)
-        
-        # Obter séries únicas de jL
-        jl_series = sorted(df_plot['jL_rounded'].unique())
-        jl_series = [jl for jl in jl_series if pd.notna(jl)]
-
-        # Re_sl_group deve ser padronizado previamente (main) para ficar constante por grupo e por inclinação
+        # Padronizar antes de copiar; legendas de j_L usam valores medidos (jL_raw) agrupados
         if 'Re_sl_group' not in df.columns:
             standardize_liquid_conditions({sheet_name: df})
 
-        df_plot['Re_sl_group'] = _one_col_series(df, 'Re_sl_group').values
+        df_plot = df.copy().reset_index(drop=True)
+        if 'Re_sl_group' in df.columns:
+            df_plot['Re_sl_group'] = _one_col_series(df, 'Re_sl_group').values
+        if 'jL_raw' in df.columns:
+            df_plot['jL_raw'] = _one_col_series(df, 'jL_raw').values
+        _cluster_measured_jl_legend_labels(df_plot, jl_col)
+        jl_series = sorted(df_plot['_jl_legend_group_mean'].dropna().unique())
+        jl_series = [jl for jl in jl_series if pd.notna(jl)]
 
         # Obter séries únicas de Re_sl (agrupado/padronizado)
         Re_sl_series = sorted(df_plot['Re_sl_group'].dropna().unique())
@@ -1935,7 +2764,7 @@ def generate_dpdzf_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         
         Re_sg_plot = _one_col_series(df_plot, 'Re_sg')
         
-        print(f"Séries de jL encontradas: {jl_series}")
+        print(f"Séries de jL (médias por grupo de valores medidos próximos): {jl_series}")
         print(f"Séries de Re_sl (padronizado) encontradas: {Re_sl_series}")
 
         line_styles, _ = get_series_line_and_marker_styles()
@@ -1996,18 +2825,27 @@ def generate_dpdzf_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
             df_plot, flow_pattern_col, flow_pattern_symbols
         )
 
-        ax.set_xlabel(r'$Re_{sg}$', fontsize=24, fontfamily='serif')
+        ax.set_xlabel(r'$Re_{sg}$ [-]', fontsize=24, fontfamily='serif')
         ax.set_ylabel(YLABEL_DP_DZ_F, fontsize=24, fontfamily='serif')
         style_axes_re_g_log_x(ax, y_major_step=0.5, y_lim_bottom=0, y_lim_top=None)
-        apply_dpdz_yaxis_tick_locators_small_scale(ax)
 
         Re_sl_legend_elements = re_sl_legend_handles_from_meta(legend_series_meta)
         ax.legend(
-            handles=Re_sl_legend_elements + legend_elements,
+            handles=combine_legend_handles_reynolds_block_first(
+                Re_sl_legend_elements, legend_elements
+            ),
             ncol=LEGEND_TOP_NCOL,
             **LEGEND_TOP_KWARGS,
         )
-        place_theta_and_system_annotation(ax, theta, fluid_1, fluid_2)
+        ax.text(
+            0.03,
+            0.92,
+            rf'$\theta = {theta}^\circ$',
+            transform=ax.transAxes,
+            fontsize=20,
+            fontfamily='serif',
+            verticalalignment='top',
+        )
 
         plt.tight_layout()
         save_figure_to_sheet_dir(f'{sheet_name}_frictional_vs_Re_g', sheet_name)
@@ -2042,19 +2880,18 @@ def generate_dpdzt_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         dp_dz_t_col = col_mapping['dp/dz_T']
         flow_pattern_col = col_mapping['Flow Pattern']
         
-        # Primeiro agrupar dados por jL (arredondando para 1 casa decimal para agrupar séries similares)
-        df_plot = df.copy().reset_index(drop=True)
-        df_plot['jL_rounded'] = _one_col_series(df_plot, jl_col).round(1)
-        
-        # Obter séries únicas de jL
-        jl_series = sorted(df_plot['jL_rounded'].unique())
-        jl_series = [jl for jl in jl_series if pd.notna(jl)]
-
-        # Re_sl_group deve ser padronizado previamente (main) para ficar constante por grupo e por inclinação
+        # Padronizar antes de copiar; legendas de j_L usam valores medidos (jL_raw) agrupados
         if 'Re_sl_group' not in df.columns:
             standardize_liquid_conditions({sheet_name: df})
 
-        df_plot['Re_sl_group'] = _one_col_series(df, 'Re_sl_group').values
+        df_plot = df.copy().reset_index(drop=True)
+        if 'Re_sl_group' in df.columns:
+            df_plot['Re_sl_group'] = _one_col_series(df, 'Re_sl_group').values
+        if 'jL_raw' in df.columns:
+            df_plot['jL_raw'] = _one_col_series(df, 'jL_raw').values
+        _cluster_measured_jl_legend_labels(df_plot, jl_col)
+        jl_series = sorted(df_plot['_jl_legend_group_mean'].dropna().unique())
+        jl_series = [jl for jl in jl_series if pd.notna(jl)]
 
         # Obter séries únicas de Re_sl (agrupado/padronizado)
         Re_sl_series = sorted(df_plot['Re_sl_group'].dropna().unique())
@@ -2062,7 +2899,7 @@ def generate_dpdzt_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         
         Re_sg_plot = _one_col_series(df_plot, 'Re_sg')
         
-        print(f"Séries de jL encontradas: {jl_series}")
+        print(f"Séries de jL (médias por grupo de valores medidos próximos): {jl_series}")
         print(f"Séries de Re_sl (padronizado) encontradas: {Re_sl_series}")
 
         line_styles, _ = get_series_line_and_marker_styles()
@@ -2123,19 +2960,28 @@ def generate_dpdzt_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
             df_plot, flow_pattern_col, flow_pattern_symbols
         )
 
-        ax.set_xlabel(r'$Re_{sg}$', fontsize=24, fontfamily='serif')
+        ax.set_xlabel(r'$Re_{sg}$ [-]', fontsize=24, fontfamily='serif')
         ax.set_ylabel(YLABEL_DP_DZ_T, fontsize=24, fontfamily='serif')
         # Total: não forçar y ≥ 0 (gradiente pode ser negativo); ticks Y automáticos.
         style_axes_re_g_log_x(ax, y_major_step=None, y_lim_bottom=None, y_lim_top=None)
-        apply_dpdz_yaxis_tick_locators_small_scale(ax)
 
         Re_sl_legend_elements = re_sl_legend_handles_from_meta(legend_series_meta)
         ax.legend(
-            handles=Re_sl_legend_elements + legend_elements,
+            handles=combine_legend_handles_reynolds_block_first(
+                Re_sl_legend_elements, legend_elements
+            ),
             ncol=LEGEND_TOP_NCOL,
             **LEGEND_TOP_KWARGS,
         )
-        place_theta_and_system_annotation(ax, theta, fluid_1, fluid_2)
+        ax.text(
+            0.03,
+            0.92,
+            rf'$\theta = {theta}^\circ$',
+            transform=ax.transAxes,
+            fontsize=20,
+            fontfamily='serif',
+            verticalalignment='top',
+        )
 
         plt.tight_layout()
         save_figure_to_sheet_dir(f'{sheet_name}_total_vs_Re_g', sheet_name)
@@ -2156,8 +3002,7 @@ def create_orientation_summary_dataframe(all_dataframes, selected_sheets):
         
     Returns:
         pd.DataFrame: DataFrame com colunas
-            [sheet_name, theta, Re_sl, frictional, alpha, total, flow_pattern, point_id, Re_sg,
-             jG, jL, rho_G, mu_G] — jL/jG e propriedades do gás por ponto experimental (brutos).
+            [sheet_name, theta, Re_sl, frictional, alpha, total, flow_pattern, point_id, Re_sg]
     """
     summary_data = []
     
@@ -2201,58 +3046,43 @@ def create_orientation_summary_dataframe(all_dataframes, selected_sheets):
         alpha_col = col_mapping.get('α', None)
         dp_dz_t_col = col_mapping.get('dp/dz_T', None)
 
-        def _find_col(*candidates):
-            for k in candidates:
-                if k in col_mapping:
-                    return col_mapping[k]
-            norm = {str(k).strip().upper(): col_mapping[k] for k in col_mapping}
-            for c in candidates:
-                if c.upper() in norm:
-                    return norm[c.upper()]
-            return None
-
-        jg_col = _find_col('jG', 'JG')
-        T_col = _find_col('Temp.', 'Temp', 'T', 'T (C)', 'T(°C)')
-        P_col = _find_col('Gauge Pressure', 'Gauge P', 'Gauge P.', 'P', 'Pressure', 'Gauge P (kPa)', 'P (kPa)')
-
-        nrows = len(df_temp)
-        rho_G_arr = np.full(nrows, np.nan, dtype=float)
-        mu_G_arr = np.full(nrows, np.nan, dtype=float)
-        if P_col is not None and T_col is not None:
-            try:
-                P_vals = pd.to_numeric(_one_col_series(df_temp, P_col), errors='coerce')
-                T_vals = pd.to_numeric(_one_col_series(df_temp, T_col), errors='coerce')
-                P_Pa = P_vals + 101325
-                T_K = T_vals + 273.15
-                rho_G_arr, mu_G_arr = _gas_density_viscosity_arrays(P_Pa, T_K, fluid_1)
-            except Exception as e:
-                print(f"Erro ao calcular rho_G/mu_G para {sheet_name}: {e}")
-
-        if jg_col is not None:
-            jg_series = pd.to_numeric(_one_col_series(df_temp, jg_col), errors='coerce')
+        # Garantir Re_sg disponível (para cálculo de Re_sg médio por série e legenda)
+        if 'Re_sg' in df.columns:
+            Re_sg_series = pd.to_numeric(df['Re_sg'], errors='coerce')
         else:
-            jg_series = pd.Series([np.nan] * nrows, index=df_temp.index)
-
-        if 'jL_raw' in df_temp.columns:
-            jl_raw_series = pd.to_numeric(_one_col_series(df_temp, 'jL_raw'), errors='coerce')
-        else:
-            jl_raw_series = pd.to_numeric(_one_col_series(df_temp, col_mapping['jL']), errors='coerce')
-
-        # Re_sg: coluna pré-calculada ou a partir de jG, P, T e propriedades do gás
-        if 'Re_sg' in df_temp.columns:
-            Re_sg_series = pd.to_numeric(_one_col_series(df_temp, 'Re_sg'), errors='coerce')
-        elif jg_col is not None and P_col is not None and T_col is not None:
+            # Tentar calcular Re_sg usando jG, Temp e Pressure (nomes podem variar, ex.: NAS)
+            Re_sg_series = pd.Series([np.nan] * len(df_temp), index=df_temp.index)
             try:
-                Re_sg_series = pd.Series(
-                    rho_G_arr * jg_series.to_numpy(dtype=float) * PIPE_DIAMETER_M / mu_G_arr,
-                    index=df_temp.index,
-                )
+                # Buscar colunas por qualquer nome usado no NAS ou formato padrão
+                def _find_col(*candidates):
+                    for k in candidates:
+                        if k in col_mapping:
+                            return col_mapping[k]
+                    norm = {str(k).strip().upper(): col_mapping[k] for k in col_mapping}
+                    for c in candidates:
+                        if c.upper() in norm:
+                            return norm[c.upper()]
+                    return None
+                jg_col = _find_col('jG', 'JG')
+                T_col = _find_col('Temp.', 'Temp', 'T', 'T (C)', 'T(°C)')
+                P_col = _find_col('Gauge Pressure', 'Gauge P', 'Gauge P.', 'P', 'Pressure', 'Gauge P (kPa)', 'P (kPa)')
+                if jg_col is not None and T_col is not None and P_col is not None:
+                    P_vals = pd.to_numeric(df[P_col], errors='coerce')
+                    T_vals = pd.to_numeric(df[T_col], errors='coerce')
+                    P_Pa = P_vals + 101325
+                    T_K = T_vals + 273.15
+                    rho_G, mu_G = _gas_density_viscosity_arrays(P_Pa, T_K, fluid_1)
+                    Re_sg_series = pd.Series(
+                        rho_G
+                        * pd.to_numeric(df[jg_col], errors='coerce').to_numpy()
+                        * PIPE_DIAMETER_M
+                        / mu_G,
+                        index=df.index,
+                    )
+                else:
+                    print(f"Aviso: não foi possível calcular Re_sg para {sheet_name} (colunas ausentes: jG/Temp/Pressure).")
             except Exception as e:
                 print(f"Erro ao calcular Re_sg para {sheet_name}: {e}")
-                Re_sg_series = pd.Series([np.nan] * nrows, index=df_temp.index)
-        else:
-            Re_sg_series = pd.Series([np.nan] * nrows, index=df_temp.index)
-            print(f"Aviso: não foi possível obter Re_sg para {sheet_name} (falta Re_sg ou jG/Temp/Pressão).")
 
         # Converter friccional e total para kPa/m e manter todos os pontos individuais
         # Garantir que os dados sejam numéricos (NAS_file pode trazer strings ou colunas duplicadas)
@@ -2306,10 +3136,6 @@ def create_orientation_summary_dataframe(all_dataframes, selected_sheets):
             
             # Sistema bifásico: primeiros 2 caracteres da aba (AW, AO, SO, AD, etc.)
             system = str(sheet_name)[:2] if sheet_name else ""
-            jg_val = jg_series.iloc[idx]
-            jl_val = jl_raw_series.iloc[idx]
-            rho_val = rho_G_arr[idx] if idx < len(rho_G_arr) else np.nan
-            mu_val = mu_G_arr[idx] if idx < len(mu_G_arr) else np.nan
             summary_data.append({
                 'sheet_name': sheet_name,
                 'system': system,
@@ -2320,11 +3146,7 @@ def create_orientation_summary_dataframe(all_dataframes, selected_sheets):
                 'total': total_val,
                 'flow_pattern': fp_val,
                 'point_id': point_id,
-                'Re_sg': re_sg_val,
-                'jG': float(jg_val) if pd.notna(jg_val) else np.nan,
-                'jL': float(jl_val) if pd.notna(jl_val) else np.nan,
-                'rho_G': float(rho_val) if np.isfinite(rho_val) else np.nan,
-                'mu_G': float(mu_val) if np.isfinite(mu_val) else np.nan,
+                'Re_sg': re_sg_val
             })
     
     return pd.DataFrame(summary_data)
@@ -2528,18 +3350,8 @@ def _generate_orientation_plot_for_quantity(
                             zorder=2,
                             alpha=0.9,
                         )
-            # Legenda: primeiro uma entrada por sistema (cor)
-            for sys in systems:
-                series_legend_elements.append(
-                    plt.Line2D(
-                        [0], [0],
-                        linestyle='-',
-                        color=system_to_color[sys],
-                        linewidth=2.5,
-                        label=str(sys),
-                    )
-                )
-            # Depois uma entrada por point_id (Re_sg, estilo de linha em cinza)
+            # Legenda: primeiro entradas $Re_{sg}$ (séries), depois sistema (cor)
+            re_sg_legend_elements = []
             for i, pid in enumerate(point_ids):
                 serie = data_re[data_re['point_id'] == pid].sort_values('theta')
                 if serie.empty:
@@ -2550,7 +3362,7 @@ def _generate_orientation_plot_for_quantity(
                     series_label = rf"$Re_{{sg}} \approx$ {mean_Re_sg_rounded}"
                 else:
                     series_label = f"{pid}"
-                series_legend_elements.append(
+                re_sg_legend_elements.append(
                     plt.Line2D(
                         [0], [0],
                         linestyle=line_styles[i % len(line_styles)],
@@ -2559,6 +3371,18 @@ def _generate_orientation_plot_for_quantity(
                         label=series_label,
                     )
                 )
+            system_legend_elements = []
+            for sys in systems:
+                system_legend_elements.append(
+                    plt.Line2D(
+                        [0], [0],
+                        linestyle='-',
+                        color=system_to_color[sys],
+                        linewidth=2.5,
+                        label=str(sys),
+                    )
+                )
+            series_legend_elements = re_sg_legend_elements + system_legend_elements
         else:
             # Um único sistema (ou nenhum): linhas em preto como antes
             for i, pid in enumerate(point_ids):
@@ -2622,9 +3446,9 @@ def _generate_orientation_plot_for_quantity(
         ax.set_ylabel(y_label, fontsize=24, fontfamily='serif')
         ax.set_axisbelow(True)
         ax.minorticks_on()
-        apply_axis_tick_style_alpha_vs_jg(ax)
-        for label in ax.get_xticklabels() + ax.get_yticklabels():
-            label.set_fontfamily('serif')
+        # Ticks como em alpha_vs_jg
+        ax.tick_params(axis='both', which='major', labelsize=18)
+        _set_ticklabels_font_serif(ax)
 
         # Limites de θ com margem de 5° para menos e para mais
         theta_min = float(data_re['theta'].min())
@@ -2674,7 +3498,11 @@ def _generate_orientation_plot_for_quantity(
 
         apply_subtle_gray_grid(ax)
 
-        combined_handles = series_legend_elements + pattern_legend_elements
+        _apply_linear_axes_one_decimal_format(ax)
+
+        combined_handles = combine_legend_handles_reynolds_block_first(
+            series_legend_elements, pattern_legend_elements
+        )
         ax.legend(
             handles=combined_handles,
             ncol=LEGEND_TOP_NCOL,
@@ -2957,6 +3785,37 @@ def main():
                     generate_alpha_vs_jg_plot(sheet_df, sheet_name, fluid_1, fluid_2, theta)
             else:
                 generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta)
+
+            # Paridade α vs β homogêneo — apenas uma inclinação (uma única aba nos dados)
+            if isinstance(df, dict):
+                if len(df) == 1:
+                    sheet_name_pb, sheet_df_pb = next(iter(df.items()))
+                    fluid_1_pb, fluid_2_pb, direction_pb, theta_pb, ID_pb, is_validation_pb = (
+                        extract_info_from_filename(sheet_name_pb)
+                    )
+                    if direction_pb == 'Downward':
+                        theta_pb = -theta_pb
+                    generate_alpha_vs_beta_homogeneous_parity_plot(
+                        sheet_df_pb, sheet_name_pb, fluid_1_pb, fluid_2_pb, theta_pb
+                    )
+            else:
+                generate_alpha_vs_beta_homogeneous_parity_plot(
+                    df, sheet_name, fluid_1, fluid_2, theta
+                )
+
+            # Matriz experimental j_L vs j_G (log-log) com flow patterns — apenas sem opção 'all'
+            if isinstance(df, dict):
+                for sheet_name, sheet_df in df.items():
+                    fluid_1, fluid_2, direction, theta, ID, is_validation = extract_info_from_filename(sheet_name)
+                    if direction == 'Downward':
+                        theta = -theta
+                    generate_jl_vs_jg_flow_pattern_matrix_plot(
+                        sheet_df, sheet_name, fluid_1, fluid_2, theta
+                    )
+            else:
+                generate_jl_vs_jg_flow_pattern_matrix_plot(
+                    df, sheet_name, fluid_1, fluid_2, theta
+                )
             
             if isinstance(df, dict):
                 for sheet_name, sheet_df in df.items():
@@ -3023,6 +3882,8 @@ def main():
                 generate_frictional_vs_orientation_plot(df, selected, units)
                 generate_alpha_vs_orientation_plot(df, selected, units)
                 generate_total_vs_orientation_plot(df, selected, units)
+                if len(selected) >= 2:
+                    generate_jl_vs_jg_flow_pattern_matrix_mosaic_plot(df, selected)
             else:
                 # Para uma única aba, usar diretamente
                 print(f"\nProcessando aba única: {sheet_name}")
