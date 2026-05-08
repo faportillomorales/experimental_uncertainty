@@ -20,10 +20,10 @@ import pandas as pd
 from CoolProp.CoolProp import PropsSI
 
 # --- Inputs globais (execução como script) ---
-file_path = 'data_example/example/NAS/Experimental_Results_v25_NAS_19_feb_2026_revA.xlsm'  # Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
+file_path = 'data_example/example/mean_sf6_v2/Mean_Experimental_Data_FSC2_SF6_Oil_v2.xlsx'  # Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
 
 # Flag para indicar leitura de workbook NAS já processado (``processed_all_sheets_<nome>.xlsx``)
-NAS_file = True
+NAS_file = False
 
 # Abas válidas para arquivos NAS (as demais serão ignoradas)
 ALLOWED_SHEETS_NAS = {
@@ -117,7 +117,7 @@ warnings.filterwarnings('ignore', category=UserWarning, module='pandas')
 warnings.filterwarnings('ignore', message=r".*timestamp seems very low.*")
 warnings.filterwarnings('ignore', message=r".*regarding as unix timestamp.*")
 
-# Legenda no topo; ncol=4 como em frictional_vs_Re_g (séries + flow patterns)
+# Legenda no topo; no máximo LEGEND_TOP_NCOL colunas; com menos entradas reduz-se ncol
 LEGEND_TOP_KWARGS = {
     'loc': 'lower center',
     'bbox_to_anchor': (0.5, 1.02),
@@ -127,6 +127,15 @@ LEGEND_TOP_KWARGS = {
     'handler_map': {LegendGridPlaceholder: HandlerLegendGridPlaceholder()},
 }
 LEGEND_TOP_NCOL = 4
+
+
+def legend_ncol_from_n_entries(n_entries, ncol_max=LEGEND_TOP_NCOL):
+    """Colunas da legenda: no máximo ``ncol_max``; com menos entradas usa só as necessárias."""
+    if n_entries <= 0:
+        return 1
+    return min(int(n_entries), int(ncol_max))
+
+
 PIPE_DIAMETER_M = 0.05251
 
 
@@ -1116,6 +1125,196 @@ def ensure_alpha_in_column_mapping(col_mapping, columns_iterable):
     return False
 
 
+# Colunas de incerteza experimental nas planilhas (Mean / exp_unc); ordem = preferência.
+_UNCERTAINTY_COLUMN_CANDIDATES = {
+    'U_alpha': (
+        # Mean / exp_unc
+        'U(alpha)',
+        'U(α)',
+        'U(Alpha)',
+        'u(alpha)',
+        'U (alpha)',
+        # NAS: U seguido de α grego (sem parênteses)
+        'Uα',
+        'uα',
+    ),
+    'U_dpdz_F': (
+        'U(-dP/dz F)',
+        'U(-dP/dz f)',
+        'U(-dpdz_F)',
+        'U(-dpdz_f)',
+    ),
+    'U_dpdz_T': (
+        'U(-dP/dz T)',
+        'U(-dP/dz t)',
+        'U(-dpdz_T)',
+        'U(-dpdz_t)',
+    ),
+}
+
+_UNCERTAINTY_TEXT_BBOX = {
+    'boxstyle': 'round,pad=0.38',
+    'facecolor': 'white',
+    'alpha': 0.88,
+    'edgecolor': '0.72',
+    'linewidth': 0.7,
+}
+
+
+def _add_theta_annotation_box(ax, theta, *, fontsize=15):
+    """Caixa com $\\theta$ no canto inferior direito (mesmo estilo que paridade / incerteza)."""
+    ax.text(
+        0.97,
+        0.03,
+        rf'$\theta = {theta}^\circ$',
+        transform=ax.transAxes,
+        fontsize=fontsize,
+        fontfamily='serif',
+        ha='right',
+        va='bottom',
+        multialignment='center',
+        zorder=6,
+        bbox=_UNCERTAINTY_TEXT_BBOX,
+        linespacing=1.22,
+    )
+
+
+def _normalize_col_name(s):
+    return str(s).strip().lower().replace(' ', '')
+
+
+def _filter_dataframe_by_theta(df, theta_deg):
+    """
+    Se existir coluna de inclinação nos dados, restringe às linhas com esse θ;
+    caso contrário devolve ``df`` (uma aba = uma inclinação).
+    """
+    if df is None or getattr(df, 'empty', True):
+        return df
+    theta_col = None
+    for col in df.columns:
+        cl = str(col).strip().lower()
+        if cl in ('theta', 'θ', 'inclination', 'angle (deg)', 'angle', 'tilt'):
+            theta_col = col
+            break
+    if theta_col is None:
+        return df
+    t = pd.to_numeric(df[theta_col], errors='coerce')
+    mask = np.isfinite(t) & np.isclose(t, float(theta_deg), atol=0.55)
+    if not mask.any():
+        return df
+    return df.loc[mask]
+
+
+def _matches_u_alpha_column_header(name) -> bool:
+    """
+    Reconhece incerteza de α nas convenções:
+    Mean — ``U(α)``, ``U(alpha)``; NAS — ``Uα`` (U + letra grega α U+03B1).
+    """
+    sc = str(name).strip().casefold().replace(' ', '')
+    α = '\u03b1'
+    if sc in (f'u{α}', f'u({α})', 'u(alpha)'):
+        return True
+    return False
+
+
+def _find_uncertainty_actual_column(df, col_mapping, logical_key):
+    """Resolve coluna original no ``df`` para U(α), U(-dP/dz F) ou U(-dP/dz T)."""
+    candidates = _UNCERTAINTY_COLUMN_CANDIDATES.get(logical_key, ())
+    for c in candidates:
+        if c in col_mapping:
+            return col_mapping[c]
+    norm_to_key = {_normalize_col_name(k): k for k in col_mapping}
+    for c in candidates:
+        nk = _normalize_col_name(c)
+        if nk in norm_to_key:
+            return col_mapping[norm_to_key[nk]]
+    # Fallback: igualdade nas colunas do DataFrame
+    for c in candidates:
+        nk = _normalize_col_name(c)
+        for col in df.columns:
+            if _normalize_col_name(col) == nk:
+                return col
+    if logical_key == 'U_alpha':
+        for col in df.columns:
+            if _matches_u_alpha_column_header(col):
+                return col
+    return None
+
+
+def _format_uncertainty_mean_display(mean_val, *, kind):
+    """Médias de incerteza nos gráficos: α e gradiente (kPa/m a partir de Pa/m) com 3 casas decimais."""
+    if not np.isfinite(mean_val):
+        return None
+    if kind == 'alpha':
+        return f'{mean_val:.3f}'
+    if kind == 'kpa_per_m':
+        return f'{mean_val / 1000.0:.3f}'
+    return f'{mean_val:.3f}'
+
+
+def add_theta_and_mean_uncertainty_text(
+    ax,
+    df,
+    theta,
+    col_mapping,
+    *,
+    uncertainty_key,
+    unit_latex=None,
+    placement='bottom',
+    fontsize=15,
+    kind='alpha',
+):
+    """
+    Quadro nos cantos do eixo (inferior direito ou superior esquerdo): θ na primeira linha;
+    na segunda, ``$U_{\\mathrm{exp}} = \\pm ...$`` quando disponível.
+    O texto multi-linha é centralizado **dentro** da caixa via ``multialignment``.
+    ``placement``: ``'bottom'`` — canto inferior direito; ``'top'`` — canto superior esquerdo.
+    """
+    lines = [rf'$\theta = {theta}^\circ$']
+    try:
+        sub = _filter_dataframe_by_theta(df, theta)
+        if sub is not None and not getattr(sub, 'empty', True):
+            actual = _find_uncertainty_actual_column(sub, col_mapping, uncertainty_key)
+            if actual is not None:
+                ser = pd.to_numeric(_one_col_series(sub, actual), errors='coerce').dropna()
+                if not ser.empty:
+                    mean_u = float(ser.mean())
+                    if np.isfinite(mean_u):
+                        val_str = _format_uncertainty_mean_display(mean_u, kind=kind)
+                        if val_str is not None:
+                            if unit_latex:
+                                lines.append(
+                                    rf'$U_{{\mathrm{{exp}}}} = \pm {val_str}\,{unit_latex}$'
+                                )
+                            else:
+                                lines.append(rf'$U_{{\mathrm{{exp}}}} = \pm {val_str}$')
+    except Exception:
+        pass
+    txt = '\n'.join(lines)
+    if placement == 'top':
+        xy = (0.03, 0.92)
+        ha = 'left'
+        va = 'top'
+    else:
+        xy = (0.97, 0.03)
+        ha = 'right'
+        va = 'bottom'
+    ax.text(
+        xy[0],
+        xy[1],
+        txt,
+        transform=ax.transAxes,
+        fontsize=fontsize,
+        fontfamily='serif',
+        ha=ha,
+        va=va,
+        multialignment='center',
+        zorder=6,
+        bbox=_UNCERTAINTY_TEXT_BBOX,
+        linespacing=1.22,
+    )
+
+
 def coerce_measurement_columns_to_nan(df):
     """
     Força NaN em células vazias ou placeholder nas colunas α, dp/dz_F e dp/dz_T
@@ -1264,12 +1463,18 @@ def finalize_jg_plot_xlim(ax):
     Eixo X (j_g): origem em 0; limite superior = próxima unidade inteira acima de j_g máximo
     (teto em 1 m/s, e se o máximo coincidir com um inteiro, usa o inteiro seguinte).
     Ex.: j_g_max = 1,2 → limite 2; j_g_max = 2 → limite 3; j_g_max = 0,8 → limite 1.
+
+    Caso especial: se ``1 < j_{g,\\max} < 1{,}5`` m/s (máximo estritamente entre 1 e 1,5),
+    impõe-se ``x_{\\max} = 1{,}5`` (faixa típica abaixo de 2 m/s porém acima de 1 m/s).
     """
     xs = _x_values_from_ax_artists(ax, positive_only=False)
     if not xs:
         ax.set_xlim(0.0, 1.0)
         return
     jg_max = float(max(xs))
+    if jg_max > 1.0 and jg_max < 1.5:
+        ax.set_xlim(0.0, 1.5)
+        return
     x_hi = int(np.ceil(jg_max - 1e-12))
     if x_hi <= jg_max:
         x_hi += 1
@@ -1563,22 +1768,23 @@ def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
                     label=rf'$J_{{l}}$ = {jl_disp:.2f} m/s',
                 )
             )
+        _ncol = legend_ncol_from_n_entries(len(jl_legend_elements) + len(legend_elements))
         ax.legend(
             handles=combine_legend_handles_reynolds_block_first(
-                jl_legend_elements, legend_elements
+                jl_legend_elements, legend_elements, ncol=_ncol
             ),
-            ncol=LEGEND_TOP_NCOL,
+            ncol=_ncol,
             **LEGEND_TOP_KWARGS,
         )
-        ax.text(
-            0.97,
-            0.03,
-            rf'$\theta = {theta}^\circ$',
-            transform=ax.transAxes,
-            fontsize=20,
-            fontfamily='serif',
-            ha='right',
-            va='bottom',
+        add_theta_and_mean_uncertainty_text(
+            ax,
+            df_plot,
+            theta,
+            col_mapping,
+            uncertainty_key='U_alpha',
+            placement='bottom',
+            fontsize=15,
+            kind='alpha',
         )
 
         plt.tight_layout()
@@ -1664,14 +1870,6 @@ def generate_alpha_vs_beta_homogeneous_parity_plot(df, sheet_name, fluid_1, flui
             linewidth=1.2,
             zorder=1,
         )
-        parity_handle = plt.Line2D(
-            [0],
-            [0],
-            linestyle='--',
-            color='0.35',
-            linewidth=1.2,
-            label=r'$\alpha = \beta$',
-        )
 
         for i in range(len(df_plot)):
             if not valid[i]:
@@ -1693,11 +1891,10 @@ def generate_alpha_vs_beta_homogeneous_parity_plot(df, sheet_name, fluid_1, flui
             df_valid, flow_pattern_col, flow_pattern_symbols
         )
 
+        _ncol = legend_ncol_from_n_entries(len(legend_fp))
         ax.legend(
-            handles=combine_legend_handles_reynolds_block_first(
-                legend_fp, [parity_handle]
-            ),
-            ncol=LEGEND_TOP_NCOL,
+            handles=legend_fp,
+            ncol=_ncol,
             **LEGEND_TOP_KWARGS,
         )
 
@@ -1721,16 +1918,7 @@ def generate_alpha_vs_beta_homogeneous_parity_plot(df, sheet_name, fluid_1, flui
 
         _apply_linear_axes_one_decimal_format(ax)
 
-        ax.text(
-            0.97,
-            0.03,
-            rf'$\theta = {theta}^\circ$',
-            transform=ax.transAxes,
-            fontsize=20,
-            fontfamily='serif',
-            ha='right',
-            va='bottom',
-        )
+        _add_theta_annotation_box(ax, theta)
 
         plt.tight_layout()
         save_figure_to_sheet_dir(f'{sheet_name}_alpha_vs_beta_homogeneous_parity', sheet_name)
@@ -1920,16 +2108,7 @@ def _decorate_jl_jg_matrix_subplot(
     ax.tick_params(axis='both', which='minor', labelsize=11)
     _set_ticklabels_font_serif(ax)
     apply_subtle_gray_grid(ax)
-    ax.text(
-        0.97,
-        0.03,
-        rf'$\theta = {theta}^\circ$',
-        transform=ax.transAxes,
-        fontsize=16,
-        fontfamily='serif',
-        ha='right',
-        va='bottom',
-    )
+    _add_theta_annotation_box(ax, theta)
 
 
 def _finalize_jl_jg_matrix_axes(ax, *, legend_elements, theta):
@@ -1942,21 +2121,13 @@ def _finalize_jl_jg_matrix_axes(ax, *, legend_elements, theta):
     _set_ticklabels_font_serif(ax)
     apply_subtle_gray_grid(ax)
     if legend_elements:
+        _ncol = legend_ncol_from_n_entries(len(legend_elements))
         ax.legend(
             handles=legend_elements,
-            ncol=LEGEND_TOP_NCOL,
+            ncol=_ncol,
             **LEGEND_TOP_KWARGS,
         )
-    ax.text(
-        0.97,
-        0.03,
-        rf'$\theta = {theta}^\circ$',
-        transform=ax.transAxes,
-        fontsize=20,
-        fontfamily='serif',
-        ha='right',
-        va='bottom',
-    )
+    _add_theta_annotation_box(ax, theta)
 
 
 def generate_jl_vs_jg_flow_pattern_matrix_plot(df, sheet_name, fluid_1, fluid_2, theta):
@@ -2245,7 +2416,7 @@ def generate_jl_vs_jg_flow_pattern_matrix_mosaic_plot(all_dataframes, selected_s
                 )
 
             if legend_handles:
-                ncol_leg = min(LEGEND_TOP_NCOL, max(1, len(legend_handles)))
+                ncol_leg = legend_ncol_from_n_entries(len(legend_handles))
                 fig.legend(
                     handles=legend_handles,
                     ncol=ncol_leg,
@@ -2411,21 +2582,24 @@ def generate_dpdzf_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
                 )
             )
 
+        _ncol = legend_ncol_from_n_entries(len(jl_legend_elements) + len(legend_elements))
         ax.legend(
             handles=combine_legend_handles_reynolds_block_first(
-                jl_legend_elements, legend_elements
+                jl_legend_elements, legend_elements, ncol=_ncol
             ),
-            ncol=LEGEND_TOP_NCOL,
+            ncol=_ncol,
             **LEGEND_TOP_KWARGS,
         )
-        ax.text(
-            0.03,
-            0.92,
-            rf'$\theta = {theta}^\circ$',
-            transform=ax.transAxes,
-            fontsize=20,
-            fontfamily='serif',
-            verticalalignment='top',
+        add_theta_and_mean_uncertainty_text(
+            ax,
+            df_plot,
+            theta,
+            col_mapping,
+            uncertainty_key='U_dpdz_F',
+            unit_latex=r'\mathrm{kPa/m}',
+            placement='top',
+            fontsize=15,
+            kind='kpa_per_m',
         )
 
         plt.tight_layout()
@@ -2554,21 +2728,24 @@ def generate_dpdzt_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
                 )
             )
 
+        _ncol = legend_ncol_from_n_entries(len(jl_legend_elements) + len(legend_elements))
         ax.legend(
             handles=combine_legend_handles_reynolds_block_first(
-                jl_legend_elements, legend_elements
+                jl_legend_elements, legend_elements, ncol=_ncol
             ),
-            ncol=LEGEND_TOP_NCOL,
+            ncol=_ncol,
             **LEGEND_TOP_KWARGS,
         )
-        ax.text(
-            0.03,
-            0.92,
-            rf'$\theta = {theta}^\circ$',
-            transform=ax.transAxes,
-            fontsize=20,
-            fontfamily='serif',
-            verticalalignment='top',
+        add_theta_and_mean_uncertainty_text(
+            ax,
+            df_plot,
+            theta,
+            col_mapping,
+            uncertainty_key='U_dpdz_T',
+            unit_latex=r'\mathrm{kPa/m}',
+            placement='top',
+            fontsize=15,
+            kind='kpa_per_m',
         )
 
         plt.tight_layout()
@@ -2690,24 +2867,25 @@ def generate_alpha_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
 
         Re_sl_legend_elements = re_sl_legend_handles_from_meta(legend_series_meta)
 
+        _ncol = legend_ncol_from_n_entries(len(Re_sl_legend_elements) + len(legend_elements))
         combined_leg = combine_legend_handles_reynolds_block_first(
-            Re_sl_legend_elements, legend_elements
+            Re_sl_legend_elements, legend_elements, ncol=_ncol
         )
         if combined_leg:
             ax.legend(
                 handles=combined_leg,
-                ncol=LEGEND_TOP_NCOL,
+                ncol=_ncol,
                 **LEGEND_TOP_KWARGS,
             )
-        ax.text(
-            0.97,
-            0.03,
-            rf'$\theta = {theta}^\circ$',
-            transform=ax.transAxes,
-            fontsize=20,
-            fontfamily='serif',
-            ha='right',
-            va='bottom',
+        add_theta_and_mean_uncertainty_text(
+            ax,
+            df_plot,
+            theta,
+            col_mapping,
+            uncertainty_key='U_alpha',
+            placement='bottom',
+            fontsize=15,
+            kind='alpha',
         )
 
         plt.tight_layout()
@@ -2829,21 +3007,24 @@ def generate_dpdzf_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         style_axes_re_g_log_x(ax, y_major_step=0.5, y_lim_bottom=0, y_lim_top=None)
 
         Re_sl_legend_elements = re_sl_legend_handles_from_meta(legend_series_meta)
+        _ncol = legend_ncol_from_n_entries(len(Re_sl_legend_elements) + len(legend_elements))
         ax.legend(
             handles=combine_legend_handles_reynolds_block_first(
-                Re_sl_legend_elements, legend_elements
+                Re_sl_legend_elements, legend_elements, ncol=_ncol
             ),
-            ncol=LEGEND_TOP_NCOL,
+            ncol=_ncol,
             **LEGEND_TOP_KWARGS,
         )
-        ax.text(
-            0.03,
-            0.92,
-            rf'$\theta = {theta}^\circ$',
-            transform=ax.transAxes,
-            fontsize=20,
-            fontfamily='serif',
-            verticalalignment='top',
+        add_theta_and_mean_uncertainty_text(
+            ax,
+            df_plot,
+            theta,
+            col_mapping,
+            uncertainty_key='U_dpdz_F',
+            unit_latex=r'\mathrm{kPa/m}',
+            placement='top',
+            fontsize=15,
+            kind='kpa_per_m',
         )
 
         plt.tight_layout()
@@ -2965,21 +3146,24 @@ def generate_dpdzt_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         style_axes_re_g_log_x(ax, y_major_step=None, y_lim_bottom=None, y_lim_top=None)
 
         Re_sl_legend_elements = re_sl_legend_handles_from_meta(legend_series_meta)
+        _ncol = legend_ncol_from_n_entries(len(Re_sl_legend_elements) + len(legend_elements))
         ax.legend(
             handles=combine_legend_handles_reynolds_block_first(
-                Re_sl_legend_elements, legend_elements
+                Re_sl_legend_elements, legend_elements, ncol=_ncol
             ),
-            ncol=LEGEND_TOP_NCOL,
+            ncol=_ncol,
             **LEGEND_TOP_KWARGS,
         )
-        ax.text(
-            0.03,
-            0.92,
-            rf'$\theta = {theta}^\circ$',
-            transform=ax.transAxes,
-            fontsize=20,
-            fontfamily='serif',
-            verticalalignment='top',
+        add_theta_and_mean_uncertainty_text(
+            ax,
+            df_plot,
+            theta,
+            col_mapping,
+            uncertainty_key='U_dpdz_T',
+            unit_latex=r'\mathrm{kPa/m}',
+            placement='top',
+            fontsize=15,
+            kind='kpa_per_m',
         )
 
         plt.tight_layout()
@@ -3499,12 +3683,15 @@ def _generate_orientation_plot_for_quantity(
 
         _apply_linear_axes_one_decimal_format(ax)
 
+        _ncol = legend_ncol_from_n_entries(
+            len(series_legend_elements) + len(pattern_legend_elements)
+        )
         combined_handles = combine_legend_handles_reynolds_block_first(
-            series_legend_elements, pattern_legend_elements
+            series_legend_elements, pattern_legend_elements, ncol=_ncol
         )
         ax.legend(
             handles=combined_handles,
-            ncol=LEGEND_TOP_NCOL,
+            ncol=_ncol,
             **LEGEND_TOP_KWARGS,
         )
 
