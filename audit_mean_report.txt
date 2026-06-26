@@ -1,0 +1,131 @@
+Arquivo: Mean_Experimental_Data_FSC2_SF6_Oil_v2.xlsx
+Abas (10): ['SOH00', 'SOD05', 'SOD15E', 'SOD30', 'SOD45', 'SOD60', 'SOD85', 'SOD90', 'SOU90', 'SOU05']
+
+========================================================================
+Opção 1: SOH00
+========================================================================
+fluid_1=SF6 fluid_2=Oil Horizontal theta=0 deg id=
+Re_sg: coerente com Excel (tolerância 5%) ou Mu_gas=0 corrigido
+Pontos plotáveis: α×jG=16 F×jG=16 T×jG=16 | α×Re_sg=16 F×Re_sg=16 T×Re_sg=16
+Re_sl_group (séries): [243.6, 610.9, 917.1, 1223.7]
+j_L legend groups: [0.2, 0.5, 0.75, 1.0]
+jL_raw: identico ao jL medido no Excel
+Flow patterns (canonicos): ['Dual-Continuous', 'Stratified Smooth', 'Stratified Wavy', 'Stratified with Mixed Interface']
+Incerteza alpha: 4 ponto(s) na serie j_L minima (indices [0, 1, 2, 3])
+
+========================================================================
+Opção 2: SOD05
+========================================================================
+fluid_1=SF6 fluid_2=Oil Downward theta=5 deg id=
+Re_sg: coerente com Excel (tolerância 5%) ou Mu_gas=0 corrigido
+Pontos plotáveis: α×jG=16 F×jG=16 T×jG=16 | α×Re_sg=16 F×Re_sg=16 T×Re_sg=16
+Re_sl_group (séries): [245.4, 611.3, 915.9, 1220.8]
+j_L legend groups: [0.2, 0.5, 0.75, 1.0]
+jL_raw: identico ao jL medido no Excel
+Flow patterns (canonicos): ['Stratified Smooth', 'Stratified Wavy', 'Stratified with Mixed Interface']
+Incerteza alpha: 4 ponto(s) na serie j_L minima (indices [0, 1, 2, 3])
+
+========================================================================
+Opção 3: SOD15E
+========================================================================
+fluid_1=SF6 fluid_2=Oil Downward theta=15 deg id=E
+Re_sg: coerente com Excel (tolerância 5%) ou Mu_gas=0 corrigido
+Pontos plotáveis: α×jG=16 F×jG=16 T×jG=16 | α×Re_sg=16 F×Re_sg=16 T×Re_sg=16
+Re_sl_group (séries): [242.7, 613.1, 916.6, 1223.2]
+j_L legend groups: [0.2, 0.5, 0.75, 1.0]
+jL_raw: identico ao jL medido no Excel
+Flow patterns (canonicos): ['Dual-Continuous', 'Pseudo-Slug', 'Rolling Wave', 'Stratified Wavy', 'Stratified with Mixed Interface']
+Incerteza alpha: 4 ponto(s) na serie j_L minima (indices [0, 1, 2, 3])
+
+========================================================================
+Opção 4: SOD30
+========================================================================
+fluid_1=SF6 fluid_2=Oil Downward theta=30 deg id=
+Re_sg: coerente com Excel (tolerância 5%) ou Mu_gas=0 corrigido
+Pontos plotáveis: α×jG=16 F×jG=16 T×jG=16 | α×Re_sg=16 F×Re_sg=16 T×Re_sg=16
+Re_sl_group (séries): [244.2, 610.6, 915.8, 1221.1]
+j_L legend groups: [0.2, 0.5, 0.75, 1.0]
+jL_raw: identico ao jL medido no Excel
+Flow patterns (canonicos): ['Dispersed Bubbles', 'Dual-Continuous', 'Pseudo-Slug', 'Rolling Wave', 'Slug', 'Stratified with Mixed Interface']
+Incerteza alpha: 4 ponto(s) na serie j_L minima (indices [0, 1, 2, 3])
+
+========================================================================
+Opção 5: SOD45
+========================================================================
+fluid_1=SF6 fluid_2=Oil Downward theta=45 deg id=
+Re_sg: coerente com Excel (tolerância 5%) ou Mu_gas=0 corrigido
+Pontos plotáveis: α×jG=16 F×jG=16 T×jG=16 | α×Re_sg=16 F×Re_sg=16 T×Re_sg=16
+Re_sl_group (séries): [244.2, 616.7, 921.9, 1227.2]
+j_L legend groups: [0.2, 0.51, 0.76, 1.0]
+jL_raw: identico ao jL medido no Excel
+Flow patterns (canonicos): ['Dispersed Bubbles', 'Dual-Continuous', 'Pseudo-Slug', 'Rolling Wave', 'Slug']
+Incerteza alpha: 4 ponto(s) na serie j_L minima (indices [0, 1, 2, 3])
+
+========================================================================
+Opção 6: SOD60
+========================================================================
+fluid_1=SF6 fluid_2=Oil Downward theta=60 deg id=
+Re_sg: coerente com Excel (tolerância 5%) ou Mu_gas=0 corrigido
+Pontos plotáveis: α×jG=16 F×jG=16 T×jG=16 | α×Re_sg=16 F×Re_sg=16 T×Re_sg=16
+Re_sl_group (séries): [244.1, 613.3, 922.7, 1226.5]
+j_L legend groups: [0.2, 0.5, 0.76, 1.0]
+jL_raw: identico ao jL medido no Excel
+Flow patterns (canonicos): ['Churn', 'Dispersed Bubbles', 'Pseudo-Slug']
+Incerteza alpha: 4 ponto(s) na serie j_L minima (indices [0, 1, 2, 3])
+
+========================================================================
+Opção 7: SOD85
+========================================================================
+fluid_1=SF6 fluid_2=Oil Downward theta=85 deg id=
+Re_sg: coerente com Excel (tolerância 5%) ou Mu_gas=0 corrigido
+Pontos plotáveis: α×jG=16 F×jG=16 T×jG=16 | α×Re_sg=16 F×Re_sg=16 T×Re_sg=16
+Re_sl_group (séries): [244.6, 614.6, 917.5, 1229.0]
+j_L legend groups: [0.2, 0.5, 0.75, 1.01]
+jL_raw: identico ao jL medido no Excel
+Flow patterns (canonicos): ['Annular', 'Churn', 'Dispersed Bubbles']
+Incerteza alpha: 4 ponto(s) na serie j_L minima (indices [0, 1, 2, 3])
+
+========================================================================
+Opção 8: SOD90
+========================================================================
+fluid_1=SF6 fluid_2=Oil Downward theta=90 deg id=
+Re_sg: coerente com Excel (tolerância 5%) ou Mu_gas=0 corrigido
+Pontos plotáveis: α×jG=16 F×jG=16 T×jG=16 | α×Re_sg=16 F×Re_sg=16 T×Re_sg=16
+Re_sl_group (séries): [243.0, 611.2, 913.4, 1215.0]
+j_L legend groups: [0.2, 0.5, 0.75, 0.99]
+jL_raw: identico ao jL medido no Excel
+Flow patterns (canonicos): ['Annular', 'Churn', 'Dispersed Bubbles']
+Incerteza alpha: 4 ponto(s) na serie j_L minima (indices [0, 1, 2, 3])
+
+========================================================================
+Opção 9: SOU90
+========================================================================
+fluid_1=SF6 fluid_2=Oil Upward theta=90 deg id=
+Re_sg Excel vs compute_Re_sg_column (>5% ou só num lado):
+  linha 15: Excel Re_sg vazio, calc OK (Mu_gas=0 → CoolProp)
+  linha 16: Excel Re_sg vazio, calc OK (Mu_gas=0 → CoolProp)
+Pontos plotáveis: α×jG=16 F×jG=16 T×jG=16 | α×Re_sg=16 F×Re_sg=16 T×Re_sg=16
+Re_sl_group (séries): [244.2, 616.7, 921.9, 1227.2]
+j_L legend groups: [0.2, 0.51, 0.76, 1.0]
+jL_raw: identico ao jL medido no Excel
+Flow patterns (canonicos): ['Churn', 'Dispersed Bubbles']
+Incerteza alpha: 4 ponto(s) na serie j_L minima (indices [0, 1, 2, 3])
+
+========================================================================
+Opção 10: SOU05
+========================================================================
+fluid_1=SF6 fluid_2=Oil Upward theta=5 deg id=
+Re_sg: coerente com Excel (tolerância 5%) ou Mu_gas=0 corrigido
+Pontos plotáveis: α×jG=16 F×jG=16 T×jG=16 | α×Re_sg=16 F×Re_sg=16 T×Re_sg=16
+Re_sl_group (séries): [243.5, 610.4, 919.2, 1222.9]
+j_L legend groups: [0.2, 0.5, 0.75, 1.0]
+jL_raw: identico ao jL medido no Excel
+Flow patterns (canonicos): ['Pseudo-Slug', 'Slug', 'Stratified with Mixed Interface']
+Incerteza alpha: 4 ponto(s) na serie j_L minima (indices [0, 1, 2, 3])
+
+========================================================================
+RESUMO DA AUDITORIA
+========================================================================
+2 alertas:
+[SOU90] linha 15: Excel Re_sg vazio, calc OK (Mu_gas=0 → CoolProp)
+[SOU90] linha 16: Excel Re_sg vazio, calc OK (Mu_gas=0 → CoolProp)

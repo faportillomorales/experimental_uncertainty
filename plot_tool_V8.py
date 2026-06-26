@@ -20,10 +20,81 @@ import pandas as pd
 from CoolProp.CoolProp import PropsSI
 
 # --- Inputs globais (execução como script) ---
-file_path = 'data_example/example/NAS/Experimental_Results_v25_NAS_19_feb_2026_revA.xlsm'  # Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
+file_path = 'data_example/example/mean_sf6_v2/Mean_Experimental_Data_FSC2_SF6_Oil_v2.xlsx'  # Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
 
 # Flag para indicar leitura de workbook NAS já processado (``processed_all_sheets_<nome>.xlsx``)
-NAS_file = True
+NAS_file = False
+
+#insira o diâmetro da tubulação em metros
+PIPE_DIAMETER_M = 0.05251
+
+#Fix plot limits
+FIX_PLOT_LIMITS = True
+plot_limits_dpdz_f_y = [0, 1.5]
+major_ticks_dpdz_f_y = 0.5      #Minor tick é automático (dividido em 5 partes)
+plot_limits_dpdz_t_y = [-9,1]
+major_ticks_dpdz_t_y = 1        #Minor tick é automático (dividido em 5 partes)
+
+def dpdz_y_limits_for_plot(kind):
+    """
+    Limites Y [kPa/m] para plots de dp/dz. ``kind``: ``'f'`` (friccional) ou ``'t'`` (total).
+    Retorna ``(bottom, top)`` ou ``(None, None)`` se ``FIX_PLOT_LIMITS`` for False.
+    """
+    if not FIX_PLOT_LIMITS:
+        return None, None
+    limits = plot_limits_dpdz_f_y if kind == 'f' else plot_limits_dpdz_t_y
+    if not limits or len(limits) != 2:
+        return None, None
+    return float(limits[0]), float(limits[1])
+
+
+def apply_fixed_dpdz_ylim(ax, kind):
+    """Fixa o eixo Y conforme ``plot_limits_dpdz_*_y`` quando ``FIX_PLOT_LIMITS`` é True."""
+    y0, y1 = dpdz_y_limits_for_plot(kind)
+    if y0 is None and y1 is None:
+        return
+    kwargs = {}
+    if y0 is not None:
+        kwargs['bottom'] = y0
+    if y1 is not None:
+        kwargs['top'] = y1
+    ax.set_ylim(**kwargs)
+
+
+def dpdz_y_major_step_for_plot(kind):
+    """
+    Passo do major tick no eixo Y [kPa/m] quando ``FIX_PLOT_LIMITS`` é True.
+    ``kind``: ``'f'`` (friccional) ou ``'t'`` (total). Caso contrário, ``None``.
+    """
+    if not FIX_PLOT_LIMITS:
+        return None
+    step = major_ticks_dpdz_f_y if kind == 'f' else major_ticks_dpdz_t_y
+    try:
+        s = float(step)
+    except (TypeError, ValueError):
+        return None
+    return s if s > 0 else None
+
+
+def apply_fixed_dpdz_y_axis(ax, kind):
+    """Limites Y, major e minor ticks de dp/dz quando ``FIX_PLOT_LIMITS`` é True."""
+    apply_fixed_dpdz_ylim(ax, kind)
+    step = dpdz_y_major_step_for_plot(kind)
+    if step is not None:
+        ax.yaxis.set_major_locator(MultipleLocator(step))
+    configure_dpdz_y_axis_minor_ticks(ax)
+
+
+DP_DZ_Y_MINOR_TICK_WIDE_RANGE = 5.0
+DP_DZ_Y_MINOR_TICK_WIDE = 0.2
+
+
+def configure_dpdz_y_axis_minor_ticks(ax):
+    """Minor ticks Y em plots dp/dz: 0,2 se ``ymax − ymin`` > 5."""
+    y0, y1 = ax.get_ylim()
+    if float(y1) - float(y0) > DP_DZ_Y_MINOR_TICK_WIDE_RANGE:
+        ax.yaxis.set_minor_locator(MultipleLocator(DP_DZ_Y_MINOR_TICK_WIDE))
+
 
 # Abas válidas para arquivos NAS (as demais serão ignoradas)
 ALLOWED_SHEETS_NAS = {
@@ -48,8 +119,8 @@ NAS_FLOW_PATTERN_MAP = {
     'SL': 'Slug',
     'PSL': 'Pseudo-Slug',
     'CH': 'Churn',
-    'DC': 'Dual-Continuous',      
-    'DB': 'Dispersed bubbles',
+    'DC': 'Dual-Continuous',
+    'DB': 'Dispersed Bubbles',
     
     # Variantes com maiúscula/minúscula (normalizadas por strip().upper() na leitura)
     'ANNULAR': 'Annular',
@@ -62,8 +133,52 @@ NAS_FLOW_PATTERN_MAP = {
     'PSEUDO-SLUG': 'Pseudo-Slug',
     'CHURN': 'Churn',
     'DUAL-CONTINUOUS': 'Dual-Continuous',
-    'DISPERSED BUBBLES': 'Dispersed bubbles',
+    'DISPERSED BUBBLES': 'Dispersed Bubbles',
 }
+
+# Variantes de texto na planilha → chave de ``get_flow_pattern_symbols()``
+_FLOW_PATTERN_CANONICAL_ALIASES = {
+    'dispersed bubbles': 'Dispersed Bubbles',
+    'pseudo-slug': 'Pseudo-Slug',
+    'pseudo slug': 'Pseudo-Slug',
+}
+
+
+def canonical_flow_pattern_name(val):
+    """Nome canónico para símbolo/cor/legenda (célula vazia → Unclassified)."""
+    if _is_blank_excel_value(val):
+        return FLOW_PATTERN_UNCLASSIFIED
+    if isinstance(val, str) and val.strip() == '':
+        return FLOW_PATTERN_UNCLASSIFIED
+    s = str(val).strip()
+    key = s.upper()
+    if key in NAS_FLOW_PATTERN_MAP:
+        name = NAS_FLOW_PATTERN_MAP[key]
+    else:
+        name = NAS_FLOW_PATTERN_MAP.get(key, s)
+    alias = _FLOW_PATTERN_CANONICAL_ALIASES.get(str(name).strip().lower())
+    if alias:
+        return alias
+    alias = _FLOW_PATTERN_CANONICAL_ALIASES.get(s.lower())
+    if alias:
+        return alias
+    return str(name).strip()
+
+
+def _build_flow_pattern_sigla_by_name():
+    """Nome completo (gráficos) → sigla NAS (preferir códigos curtos do mapa)."""
+    by_name = {}
+    for sigla, name in NAS_FLOW_PATTERN_MAP.items():
+        if len(sigla) > 6:
+            continue
+        cur = by_name.get(name)
+        if cur is None or len(sigla) < len(cur):
+            by_name[name] = sigla
+    return by_name
+
+
+FLOW_PATTERN_SIGLA_BY_NAME = _build_flow_pattern_sigla_by_name()
+
 
 class LegendGridPlaceholder(Line2D):
     """
@@ -127,6 +242,9 @@ LEGEND_TOP_KWARGS = {
     'handler_map': {LegendGridPlaceholder: HandlerLegendGridPlaceholder()},
 }
 LEGEND_TOP_NCOL = 4
+# Duas legendas empilhadas: flow patterns mais perto do gráfico; J_l/Re_sl acima.
+LEGEND_TOP_ANCHOR_Y_FLOW = 1.02
+LEGEND_TOP_ANCHOR_Y_SERIES = 1.08
 
 
 def legend_ncol_from_n_entries(n_entries, ncol_max=LEGEND_TOP_NCOL):
@@ -136,7 +254,50 @@ def legend_ncol_from_n_entries(n_entries, ncol_max=LEGEND_TOP_NCOL):
     return min(int(n_entries), int(ncol_max))
 
 
-PIPE_DIAMETER_M = 0.05251
+def legend_ncol_flow_patterns_only(n_patterns):
+    """Segunda linha da legenda: uma coluna por padrão de escoamento (uma linha só)."""
+    return max(int(n_patterns), 1)
+
+
+def apply_two_row_top_legend(ax, head_handles, tail_handles, *, head_ncol_max=LEGEND_TOP_NCOL):
+    """
+    Duas legendas no topo, cada uma com ``ncol`` próprio — sem placeholders nem células vazias.
+    Linha superior: condições (J_l, Re_sl, …); linha inferior: siglas de flow pattern.
+    """
+    head = list(head_handles or [])
+    tail = list(tail_handles or [])
+    base = {k: v for k, v in LEGEND_TOP_KWARGS.items() if k != 'bbox_to_anchor'}
+
+    if head and tail:
+        leg_flow = ax.legend(
+            handles=tail,
+            ncol=legend_ncol_flow_patterns_only(len(tail)),
+            bbox_to_anchor=(0.5, LEGEND_TOP_ANCHOR_Y_FLOW),
+            **base,
+        )
+        ax.add_artist(leg_flow)
+        ax.legend(
+            handles=head,
+            ncol=legend_ncol_from_n_entries(len(head), ncol_max=head_ncol_max),
+            bbox_to_anchor=(0.5, LEGEND_TOP_ANCHOR_Y_SERIES),
+            **base,
+        )
+    elif head:
+        ax.legend(
+            handles=head,
+            ncol=legend_ncol_from_n_entries(len(head), ncol_max=head_ncol_max),
+            bbox_to_anchor=LEGEND_TOP_KWARGS['bbox_to_anchor'],
+            **base,
+        )
+    elif tail:
+        ax.legend(
+            handles=tail,
+            ncol=legend_ncol_flow_patterns_only(len(tail)),
+            bbox_to_anchor=LEGEND_TOP_KWARGS['bbox_to_anchor'],
+            **base,
+        )
+
+
 
 
 def _safe_processed_filename_segment(name: str) -> str:
@@ -973,11 +1134,15 @@ def get_flow_pattern_symbols():
 
 def flow_pattern_display_label(val):
     """Rótulo para legenda/marcador; célula de flow pattern vazia → Unclassified."""
-    if _is_blank_excel_value(val):
+    return canonical_flow_pattern_name(val)
+
+
+def flow_pattern_legend_label(val):
+    """Sigla NAS para rótulo de legenda; célula vazia → Unclassified."""
+    display = flow_pattern_display_label(val)
+    if display == FLOW_PATTERN_UNCLASSIFIED:
         return FLOW_PATTERN_UNCLASSIFIED
-    if isinstance(val, str) and val.strip() == '':
-        return FLOW_PATTERN_UNCLASSIFIED
-    return val
+    return FLOW_PATTERN_SIGLA_BY_NAME.get(display, display)
 
 
 def style_for_flow_pattern_cell(val, flow_pattern_symbols=None):
@@ -988,8 +1153,8 @@ def style_for_flow_pattern_cell(val, flow_pattern_symbols=None):
     if label == FLOW_PATTERN_UNCLASSIFIED:
         return flow_pattern_symbols[FLOW_PATTERN_UNCLASSIFIED]
     return flow_pattern_symbols.get(
-        val,
-        flow_pattern_symbols.get(label, {'symbol': 'o', 'color': 'gray'}),
+        label,
+        {'symbol': 'o', 'color': 'gray'},
     )
 
 
@@ -1110,6 +1275,17 @@ YLABEL_DP_DZ_F = (
 YLABEL_DP_DZ_T = (
     r'$- \left(\frac{\text{dP}}{\text{dz}}\right)_\text{t} \; \left[\frac{\mathrm{kPa}}{\mathrm{m}}\right]$'
 )
+
+ALPHA_Y_AXIS_MAJOR_STEP = 0.1
+ALPHA_Y_AXIS_MINOR_STEP = 0.05
+
+
+def configure_alpha_y_axis_ticks(ax, *, major_step=None):
+    """Eixo Y de α ∈ [0, 1]: major (default 0,1) e minor (0,05) padronizados."""
+    if major_step is None:
+        major_step = ALPHA_Y_AXIS_MAJOR_STEP
+    ax.yaxis.set_major_locator(MultipleLocator(major_step))
+    ax.yaxis.set_minor_locator(MultipleLocator(ALPHA_Y_AXIS_MINOR_STEP))
 
 
 def _apply_mean_experimental_column_aliases(col_mapping):
@@ -1309,6 +1485,49 @@ def _find_point_uncertainty_column(df, col_mapping, logical_key):
     return None
 
 
+def _indices_for_lowest_jl_series(df_plot, jl_col, x_series, y_series):
+    """Índices de todos os pontos da série de menor j_L (``_jl_legend_group_mean``)."""
+    if '_jl_legend_group_mean' not in df_plot.columns:
+        _cluster_measured_jl_legend_labels(df_plot, jl_col)
+    grp = pd.to_numeric(df_plot['_jl_legend_group_mean'], errors='coerce')
+    x = pd.to_numeric(x_series, errors='coerce')
+    y = pd.to_numeric(y_series, errors='coerce')
+    valid = grp.notna() & x.notna() & y.notna()
+    if not bool(valid.any()):
+        return []
+    min_grp = float(grp[valid].min())
+    sel = valid & np.isclose(grp, min_grp, rtol=0, atol=1e-6)
+    return list(df_plot.index[sel])
+
+
+def _indices_for_lowest_resl_series(df_plot, x_series, y_series):
+    """Índices de todos os pontos da série de menor ``Re_sl_group``."""
+    if 'Re_sl_group' not in df_plot.columns:
+        return []
+    re = pd.to_numeric(df_plot['Re_sl_group'], errors='coerce')
+    x = pd.to_numeric(x_series, errors='coerce')
+    y = pd.to_numeric(y_series, errors='coerce')
+    valid = re.notna() & x.notna() & y.notna()
+    if not bool(valid.any()):
+        return []
+    min_re = float(re[valid].min())
+    sel = valid & np.isclose(re, min_re, rtol=0, atol=0.5)
+    return list(df_plot.index[sel])
+
+
+def _selected_lowest_condition_indices(selector_series, x_series, y_series):
+    """Retrocompat.: preferir ``_indices_for_lowest_jl_series`` / ``_indices_for_lowest_resl_series``."""
+    selector = pd.to_numeric(selector_series, errors='coerce')
+    x = pd.to_numeric(x_series, errors='coerce')
+    y = pd.to_numeric(y_series, errors='coerce')
+    valid = selector.notna() & x.notna() & y.notna()
+    if not bool(valid.any()):
+        return []
+    min_val = float(selector[valid].min())
+    in_min = valid & np.isclose(selector, min_val, rtol=0, atol=1e-6)
+    return list(selector.index[in_min])
+
+
 def _selected_highest_indices(selector_series, x_series, y_series, n=4):
     """Índices dos n pontos válidos com maior valor do selector (ordem estável)."""
     selector = pd.to_numeric(selector_series, errors='coerce')
@@ -1378,7 +1597,8 @@ def add_theta_and_mean_uncertainty_text(
     Quadro nos cantos do eixo (inferior direito ou superior esquerdo): θ na primeira linha;
     na segunda, ``$U_{\\mathrm{exp}} = \\pm ...$`` quando disponível.
     O texto multi-linha é centralizado **dentro** da caixa via ``multialignment``.
-    ``placement``: ``'bottom'`` — canto inferior direito; ``'top'`` — canto superior esquerdo.
+    ``placement``: ``'bottom'`` — canto inferior direito; ``'top'`` — canto superior esquerdo;
+    ``'top_right'`` — canto superior direito.
     """
     lines = [rf'$\theta = {theta}^\circ$']
     try:
@@ -1405,6 +1625,22 @@ def add_theta_and_mean_uncertainty_text(
         xy = (0.03, 0.92)
         ha = 'left'
         va = 'top'
+    elif placement == 'top_right':
+        xy = (0.97, 0.92)
+        ha = 'right'
+        va = 'top'
+    elif placement == 'top_left':
+        xy = (0.03, 0.92)
+        ha = 'left'
+        va = 'top'
+    elif placement == 'bottom_right':
+        xy = (0.97, 0.03)
+        ha = 'right'
+        va = 'bottom'
+    elif placement == 'bottom_left':
+        xy = (0.03, 0.03)
+        ha = 'left'
+        va = 'bottom'
     else:
         xy = (0.97, 0.03)
         ha = 'right'
@@ -1464,6 +1700,51 @@ def coerce_measurement_columns_to_nan(df):
     return df
 
 
+def _resolve_column_from_mapping(col_mapping, *names):
+    """Resolve coluna original a partir de candidatos (match strip, case-insensitive)."""
+    if not col_mapping:
+        return None
+    norm_map = {str(k).strip().lower(): v for k, v in col_mapping.items()}
+    for name in names:
+        key = str(name).strip().lower()
+        if key in norm_map:
+            return norm_map[key]
+    compact = {
+        str(k).strip().lower().replace('_', '').replace(' ', ''): v
+        for k, v in col_mapping.items()
+    }
+    for name in names:
+        key = str(name).strip().lower().replace('_', '').replace(' ', '')
+        if key in compact:
+            return compact[key]
+    return None
+
+
+def _unit_for_column(units_dict, col_obj):
+    """Unidade declarada na linha 4 do Excel para a coluna ``col_obj``."""
+    if not units_dict:
+        return ''
+    target = str(col_obj).strip().lower()
+    for k, u in units_dict.items():
+        if str(k).strip().lower() == target:
+            return '' if u is None or (isinstance(u, float) and pd.isna(u)) else str(u)
+    return ''
+
+
+def _absolute_pressure_pa_from_gauge(gauge_values, unit_text=''):
+    """
+    Converte pressão manométrica para absoluta [Pa].
+    Mean/exp_unc: bar gauge → ``(P+1)*1e5``; kPa ou Pa gauge conforme unidade na planilha.
+    """
+    g = pd.to_numeric(gauge_values, errors='coerce')
+    u = (unit_text or '').strip().lower()
+    if 'bar' in u:
+        return (g + 1.0) * 1e5
+    if 'kpa' in u:
+        return g * 1000.0 + 101325.0
+    return g + 101325.0
+
+
 def _gas_density_viscosity_arrays(P_Pa, T_K, fluid_1):
     """
     Densidade e viscosidade do gás (CoolProp) linha a linha.
@@ -1479,26 +1760,65 @@ def _gas_density_viscosity_arrays(P_Pa, T_K, fluid_1):
         if not np.isfinite(p) or not np.isfinite(t):
             continue
         try:
-            rho_G[i] = PropsSI('D', 'P', p, 'T', t, fluid_1)
-            mu_G[i] = PropsSI('V', 'P', p, 'T', t, fluid_1)
+            rho = PropsSI('D', 'P', p, 'T', t, fluid_1)
+            mu = PropsSI('V', 'P', p, 'T', t, fluid_1)
+            if np.isfinite(rho) and rho > 0:
+                rho_G[i] = rho
+            if np.isfinite(mu) and mu > 0:
+                mu_G[i] = mu
         except Exception:
             continue
     return rho_G, mu_G
 
 
-def compute_Re_sg_column(df, col_mapping, fluid_1, D=PIPE_DIAMETER_M):
-    """Calcula Re_sg ponto a ponto e grava em df['Re_sg'] (CoolProp + jG, P, T)."""
-    jg_col = col_mapping['jG']
-    P_col = col_mapping['Gauge Pressure']
-    T_col = col_mapping['Temp.']
-    P_Pa = pd.to_numeric(_one_col_series(df, P_col), errors='coerce') + 101325
-    T_K = pd.to_numeric(_one_col_series(df, T_col), errors='coerce') + 273
-    rho_G, mu_G = _gas_density_viscosity_arrays(P_Pa, T_K, fluid_1)
-    jg_vals = pd.to_numeric(_one_col_series(df, jg_col), errors='coerce')
-    df['Re_sg'] = pd.Series(
-        rho_G * jg_vals.to_numpy() * D / mu_G,
-        index=df.index,
-    )
+def compute_Re_sg_column(df, col_mapping, fluid_1, D=PIPE_DIAMETER_M, units_dict=None):
+    """
+    Calcula ``Re_sg = ρ_g j_g D / μ_g`` ponto a ponto e grava em ``df['Re_sg']``.
+
+    Planilhas Mean: usa ``Rho_gas`` e ``Mu_gas`` quando válidos (> 0). Se μ_g (ou ρ_g)
+    faltar ou for ≤ 0 numa linha (ex. SOU90 com Mu_gas = 0 na condição de maior j_L),
+    recalcula só essa propriedade com CoolProp (P, T) — evita série ausente em *_vs_Re_g.
+    Sem colunas de propriedades do gás, usa CoolProp em todas as linhas (ex.: NAS).
+    """
+    jg_vals = pd.to_numeric(_one_col_series(df, col_mapping['jG']), errors='coerce').to_numpy()
+    n = len(jg_vals)
+    rho = np.full(n, np.nan, dtype=float)
+    mu = np.full(n, np.nan, dtype=float)
+
+    rho_col = _resolve_column_from_mapping(col_mapping, 'Rho_gas', 'rho_g', 'Rho_g')
+    mu_col = _resolve_column_from_mapping(col_mapping, 'Mu_gas', 'mu_g', 'Mu_g')
+    if rho_col is not None:
+        rho = pd.to_numeric(_one_col_series(df, rho_col), errors='coerce').to_numpy(dtype=float)
+    if mu_col is not None:
+        mu = pd.to_numeric(_one_col_series(df, mu_col), errors='coerce').to_numpy(dtype=float)
+
+    P_col = col_mapping.get('Gauge Pressure')
+    T_col = col_mapping.get('Temp.')
+    if P_col is not None and T_col is not None:
+        unit_p = _unit_for_column(units_dict, P_col)
+        P_Pa = _absolute_pressure_pa_from_gauge(_one_col_series(df, P_col), unit_p)
+        T_K = pd.to_numeric(_one_col_series(df, T_col), errors='coerce').to_numpy(dtype=float) + 273.15
+        rho_cp, mu_cp = _gas_density_viscosity_arrays(P_Pa, T_K, fluid_1)
+        need_rho = ~np.isfinite(rho) | (rho <= 0)
+        need_mu = ~np.isfinite(mu) | (mu <= 0)
+        if rho_col is None:
+            need_rho = np.isfinite(T_K) & np.isfinite(P_Pa)
+        if mu_col is None:
+            need_mu = np.isfinite(T_K) & np.isfinite(P_Pa)
+        rho = np.where(
+            need_rho & np.isfinite(rho_cp) & (rho_cp > 0),
+            rho_cp,
+            rho,
+        )
+        mu = np.where(
+            need_mu & np.isfinite(mu_cp) & (mu_cp > 0),
+            mu_cp,
+            mu,
+        )
+
+    mu = np.where(np.isfinite(mu) & (mu > 0), mu, np.nan)
+    rho = np.where(np.isfinite(rho) & (rho > 0), rho, np.nan)
+    df['Re_sg'] = pd.Series(rho * jg_vals * D / mu, index=df.index)
 
 
 def save_figure_to_sheet_dir(base_name, sheet_name):
@@ -1532,9 +1852,9 @@ def flow_pattern_legend_handles(df_plot, flow_pattern_col, flow_pattern_symbols=
                 color='w',
                 markerfacecolor=color,
                 markersize=8,
-                markeredgecolor='black',
+                markeredgecolor=color,
                 markeredgewidth=1,
-                label=pattern,
+                label=flow_pattern_legend_label(pattern),
             )
         )
     return handles
@@ -1674,6 +1994,12 @@ def round_re_sl_for_display(re_sl):
     return int(round(x / 100.0) * 100)
 
 
+def _mask_re_sl_group(series, re_l):
+    """Máscara booleana para pontos da série ``Re_sl_group`` (tolerância em Re_sl)."""
+    re = pd.to_numeric(series, errors='coerce')
+    return np.isclose(re, float(re_l), rtol=0, atol=0.5)
+
+
 def re_sl_legend_handles_from_meta(legend_series_meta):
     """legend_series_meta: sequência de (re_l, linestyle)."""
     out = []
@@ -1702,32 +2028,40 @@ def combine_legend_handles_reynolds_block_first(
     tail_handles,
     *,
     ncol=LEGEND_TOP_NCOL,
+    tail_ncol=None,
 ):
     """
     Coloca os handles da primeira lista (``Re_{sl}``, ``Re_{sg}``, ``J_l``, etc.)
-    nas primeira(s) linha(s) da grelha da legenda (``ncol`` colunas); as entradas
-    seguintes (ex.: flow patterns ou linha ``\\alpha=\\beta``) ocupam as linhas
-    posteriores.
+    nas primeira(s) linha(s) da grelha da legenda; as entradas seguintes (ex.: flow
+    patterns) ocupam as linhas posteriores.
+
+    ``ncol`` regula o bloco superior; ``tail_ncol`` (por omissão = ``ncol``) regula o
+    bloco inferior — tipicamente ``tail_ncol`` = número de padrões de escoamento para
+    uma única linha. A largura da grelha é ``max(ncol, tail_ncol)``.
 
     O matplotlib constrói colunas empilhando blocos contíguos da lista linear de handles;
     por isso é necessário converter uma grelha **linha a linha** para a ordem linear que
     o legend usa (preencimento por colunas / ordem Fortran da matriz).
     """
+    head_ncol = ncol
+    if tail_ncol is None:
+        tail_ncol = head_ncol
+    grid_ncol = max(head_ncol, tail_ncol)
 
-    def _rows_from_handles(handles):
+    def _rows_from_handles(handles, block_ncol):
         if not handles:
             return []
         h = list(handles)
         rows = []
-        for i in range(0, len(h), ncol):
-            chunk = h[i : i + ncol]
-            if len(chunk) < ncol:
-                chunk = chunk + [_legend_grid_placeholder_handle()] * (ncol - len(chunk))
+        for i in range(0, len(h), block_ncol):
+            chunk = h[i : i + block_ncol]
+            if len(chunk) < grid_ncol:
+                chunk = chunk + [_legend_grid_placeholder_handle()] * (grid_ncol - len(chunk))
             rows.append(chunk)
         return rows
 
-    r_rows = _rows_from_handles(reynolds_handles)
-    t_rows = _rows_from_handles(tail_handles)
+    r_rows = _rows_from_handles(reynolds_handles, head_ncol)
+    t_rows = _rows_from_handles(tail_handles, tail_ncol)
     if not r_rows:
         all_rows = t_rows
     elif not t_rows:
@@ -1739,7 +2073,7 @@ def combine_legend_handles_reynolds_block_first(
         return []
 
     linear = []
-    for c in range(ncol):
+    for c in range(grid_ncol):
         for r in range(len(all_rows)):
             linear.append(all_rows[r][c])
     return linear
@@ -1789,8 +2123,9 @@ def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         line_styles, _ = get_series_line_and_marker_styles()
         flow_pattern_symbols = get_flow_pattern_symbols()
         alpha_unc_col = _find_point_uncertainty_column(df_plot, col_mapping, 'U_alpha')
-        highest_jl_uncertainty_indices = _selected_highest_indices(
-            _measured_jl_for_legend_series(df_plot, jl_col),
+        lowest_jl_uncertainty_indices = _indices_for_lowest_jl_series(
+            df_plot,
+            jl_col,
             _one_col_series(df_plot, jg_col),
             _one_col_series(df_plot, alpha_col),
         )
@@ -1830,8 +2165,8 @@ def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
                     )
                     symbol = pattern_data['symbol']
                     color = pattern_data['color']
-                    ax.scatter(jg_val, alpha_val, c=color, marker=symbol, s=100, 
-                             edgecolors='black', linewidth=1, zorder=2)
+                    ax.scatter(jg_val, alpha_val, c=color, marker=symbol, s=100,
+                             edgecolors=color, linewidth=1, zorder=2)
                     
                 
                 
@@ -1840,13 +2175,13 @@ def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         n_unc = _plot_selected_y_uncertainty(
             ax,
             df_plot,
-            highest_jl_uncertainty_indices,
+            lowest_jl_uncertainty_indices,
             jg_col,
             alpha_col,
             alpha_unc_col,
         )
         if n_unc:
-            print(f"Incerteza de alpha incluida nos {n_unc} pontos de maior jL.")
+            print(f"Incerteza de alpha incluida nos {n_unc} pontos de menor jL.")
 
         legend_elements = flow_pattern_legend_handles(
             df_plot, flow_pattern_col, flow_pattern_symbols
@@ -1867,11 +2202,8 @@ def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         jg_vals = pd.to_numeric(_one_col_series(df_plot, jg_col), errors='coerce').to_numpy()
         configure_linear_jg_axis_tick_locators(ax, jg_vals)
 
-        ax.yaxis.set_major_locator(MultipleLocator(0.1))
+        configure_alpha_y_axis_ticks(ax)
 
-        # Configurar espaçamento dos ticks menores
-        # ax.yaxis.set_minor_locator(MultipleLocator(0.05))
-        
         ax.set_ylim(bottom=0, top=1)
         
         # Configurar tamanho dos ticks com fonte acadêmica
@@ -1895,14 +2227,7 @@ def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
                     label=rf'$J_{{l}}$ = {jl_disp:.2f} m/s',
                 )
             )
-        _ncol = legend_ncol_from_n_entries(len(jl_legend_elements) + len(legend_elements))
-        ax.legend(
-            handles=combine_legend_handles_reynolds_block_first(
-                jl_legend_elements, legend_elements, ncol=_ncol
-            ),
-            ncol=_ncol,
-            **LEGEND_TOP_KWARGS,
-        )
+        apply_two_row_top_legend(ax, jl_legend_elements, legend_elements)
         add_theta_and_mean_uncertainty_text(
             ax,
             df_plot,
@@ -2008,7 +2333,7 @@ def generate_alpha_vs_beta_homogeneous_parity_plot(df, sheet_name, fluid_1, flui
                 c=pd_['color'],
                 marker=pd_['symbol'],
                 s=100,
-                edgecolors='black',
+                edgecolors=pd_['color'],
                 linewidth=1,
                 zorder=2,
             )
@@ -2018,7 +2343,7 @@ def generate_alpha_vs_beta_homogeneous_parity_plot(df, sheet_name, fluid_1, flui
             df_valid, flow_pattern_col, flow_pattern_symbols
         )
 
-        _ncol = legend_ncol_from_n_entries(len(legend_fp))
+        _ncol = legend_ncol_flow_patterns_only(len(legend_fp))
         ax.legend(
             handles=legend_fp,
             ncol=_ncol,
@@ -2036,7 +2361,7 @@ def generate_alpha_vs_beta_homogeneous_parity_plot(df, sheet_name, fluid_1, flui
         ax.set_aspect('equal', adjustable='box')
 
         ax.xaxis.set_major_locator(MultipleLocator(0.2))
-        ax.yaxis.set_major_locator(MultipleLocator(0.2))
+        configure_alpha_y_axis_ticks(ax, major_step=0.2)
         ax.minorticks_on()
 
         ax.tick_params(axis='both', which='major', labelsize=20)
@@ -2171,11 +2496,20 @@ def _axis_tick_decimal_linear(x, pos):
     return f'{x:.1f}'
 
 
-def _apply_linear_axes_one_decimal_format(ax):
-    """Formata números dos eixos X e Y com 1 casa decimal (escala linear)."""
-    fmt = FuncFormatter(_axis_tick_decimal_linear)
-    ax.xaxis.set_major_formatter(fmt)
-    ax.yaxis.set_major_formatter(fmt)
+def _axis_tick_integer_linear(x, pos):
+    """Ticks em escala linear sem casas decimais (p.ex. inclinação θ [°])."""
+    if not np.isfinite(x):
+        return ''
+    return f'{int(round(x))}'
+
+
+def _apply_linear_axes_one_decimal_format(ax, *, integer_x=False):
+    """Formata eixo Y com 1 casa decimal; eixo X idem ou inteiro se ``integer_x``."""
+    ax.yaxis.set_major_formatter(FuncFormatter(_axis_tick_decimal_linear))
+    if integer_x:
+        ax.xaxis.set_major_formatter(FuncFormatter(_axis_tick_integer_linear))
+    else:
+        ax.xaxis.set_major_formatter(FuncFormatter(_axis_tick_decimal_linear))
 
 
 def _jl_jg_matrix_load_valid_series(df):
@@ -2248,7 +2582,7 @@ def _finalize_jl_jg_matrix_axes(ax, *, legend_elements, theta):
     _set_ticklabels_font_serif(ax)
     apply_subtle_gray_grid(ax)
     if legend_elements:
-        _ncol = legend_ncol_from_n_entries(len(legend_elements))
+        _ncol = legend_ncol_flow_patterns_only(len(legend_elements))
         ax.legend(
             handles=legend_elements,
             ncol=_ncol,
@@ -2321,7 +2655,7 @@ def generate_jl_vs_jg_flow_pattern_matrix_plot(df, sheet_name, fluid_1, fluid_2,
                     c=color,
                     marker=symbol,
                     s=120,
-                    edgecolors='black',
+                    edgecolors=color,
                     linewidth=1,
                     zorder=2,
                 )
@@ -2510,7 +2844,7 @@ def generate_jl_vs_jg_flow_pattern_matrix_mosaic_plot(all_dataframes, selected_s
                         c=pd_['color'],
                         marker=pd_['symbol'],
                         s=85,
-                        edgecolors='black',
+                        edgecolors=pd_['color'],
                         linewidth=0.9,
                         zorder=2,
                     )
@@ -2543,7 +2877,7 @@ def generate_jl_vs_jg_flow_pattern_matrix_mosaic_plot(all_dataframes, selected_s
                 )
 
             if legend_handles:
-                ncol_leg = legend_ncol_from_n_entries(len(legend_handles))
+                ncol_leg = legend_ncol_flow_patterns_only(len(legend_handles))
                 fig.legend(
                     handles=legend_handles,
                     ncol=ncol_leg,
@@ -2614,8 +2948,9 @@ def generate_dpdzf_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         line_styles, _ = get_series_line_and_marker_styles()
         flow_pattern_symbols = get_flow_pattern_symbols()
         dp_dz_f_unc_col = _find_point_uncertainty_column(df_plot, col_mapping, 'U_dpdz_F')
-        highest_jl_uncertainty_indices = _selected_highest_indices(
-            _measured_jl_for_legend_series(df_plot, jl_col),
+        lowest_jl_uncertainty_indices = _indices_for_lowest_jl_series(
+            df_plot,
+            jl_col,
             _one_col_series(df_plot, jg_col),
             _one_col_series(df_plot, dp_dz_f_col),
         )
@@ -2663,7 +2998,7 @@ def generate_dpdzf_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
                         c=color,
                         marker=symbol,
                         s=100,
-                        edgecolors='black',
+                        edgecolors=color,
                         linewidth=1,
                         zorder=2,
                     )
@@ -2673,14 +3008,14 @@ def generate_dpdzf_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         n_unc = _plot_selected_y_uncertainty(
             ax,
             df_plot,
-            highest_jl_uncertainty_indices,
+            lowest_jl_uncertainty_indices,
             jg_col,
             dp_dz_f_col,
             dp_dz_f_unc_col,
             y_scale=1 / 1000,
         )
         if n_unc:
-            print(f"Incerteza de gradiente friccional incluida nos {n_unc} pontos de maior jL.")
+            print(f"Incerteza de gradiente friccional incluida nos {n_unc} pontos de menor jL.")
 
         legend_elements = flow_pattern_legend_handles(
             df_plot, flow_pattern_col, flow_pattern_symbols
@@ -2699,13 +3034,13 @@ def generate_dpdzf_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
 
         jg_vals = pd.to_numeric(_one_col_series(df_plot, jg_col), errors='coerce').to_numpy()
         configure_linear_jg_axis_tick_locators(ax, jg_vals)
-        ax.yaxis.set_major_locator(MultipleLocator(0.5))
 
-        # ax.yaxis.set_minor_locator(MultipleLocator(0.05))
-        
-        ax.set_ylim(bottom=0)
-        
-        # Configurar tamanho dos ticks com fonte acadêmica
+        y_lo, y_hi = dpdz_y_limits_for_plot('f')
+        if y_lo is not None or y_hi is not None:
+            apply_fixed_dpdz_y_axis(ax, 'f')
+        else:
+            ax.set_ylim(bottom=0)
+            configure_dpdz_y_axis_minor_ticks(ax)
         ax.tick_params(axis='both', which='major', labelsize=20)
         _set_ticklabels_font_serif(ax)
         apply_subtle_gray_grid(ax)
@@ -2727,14 +3062,7 @@ def generate_dpdzf_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
                 )
             )
 
-        _ncol = legend_ncol_from_n_entries(len(jl_legend_elements) + len(legend_elements))
-        ax.legend(
-            handles=combine_legend_handles_reynolds_block_first(
-                jl_legend_elements, legend_elements, ncol=_ncol
-            ),
-            ncol=_ncol,
-            **LEGEND_TOP_KWARGS,
-        )
+        apply_two_row_top_legend(ax, jl_legend_elements, legend_elements)
         add_theta_and_mean_uncertainty_text(
             ax,
             df_plot,
@@ -2789,8 +3117,9 @@ def generate_dpdzt_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         line_styles, _ = get_series_line_and_marker_styles()
         flow_pattern_symbols = get_flow_pattern_symbols()
         dp_dz_t_unc_col = _find_point_uncertainty_column(df_plot, col_mapping, 'U_dpdz_T')
-        highest_jl_uncertainty_indices = _selected_highest_indices(
-            _measured_jl_for_legend_series(df_plot, jl_col),
+        lowest_jl_uncertainty_indices = _indices_for_lowest_jl_series(
+            df_plot,
+            jl_col,
             _one_col_series(df_plot, jg_col),
             _one_col_series(df_plot, dp_dz_t_col),
         )
@@ -2837,7 +3166,7 @@ def generate_dpdzt_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
                         c=color,
                         marker=symbol,
                         s=100,
-                        edgecolors='black',
+                        edgecolors=color,
                         linewidth=1,
                         zorder=2,
                     )
@@ -2847,14 +3176,14 @@ def generate_dpdzt_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         n_unc = _plot_selected_y_uncertainty(
             ax,
             df_plot,
-            highest_jl_uncertainty_indices,
+            lowest_jl_uncertainty_indices,
             jg_col,
             dp_dz_t_col,
             dp_dz_t_unc_col,
             y_scale=1 / 1000,
         )
         if n_unc:
-            print(f"Incerteza de gradiente total incluida nos {n_unc} pontos de maior jL.")
+            print(f"Incerteza de gradiente total incluida nos {n_unc} pontos de menor jL.")
 
         legend_elements = flow_pattern_legend_handles(
             df_plot, flow_pattern_col, flow_pattern_symbols
@@ -2869,6 +3198,9 @@ def generate_dpdzt_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
 
         jg_vals = pd.to_numeric(_one_col_series(df_plot, jg_col), errors='coerce').to_numpy()
         configure_linear_jg_axis_tick_locators(ax, jg_vals)
+        y_lo, y_hi = dpdz_y_limits_for_plot('t')
+        if y_lo is not None or y_hi is not None:
+            apply_fixed_dpdz_y_axis(ax, 't')
 
         ax.tick_params(axis='both', which='major', labelsize=20)
         _set_ticklabels_font_serif(ax)
@@ -2891,14 +3223,7 @@ def generate_dpdzt_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
                 )
             )
 
-        _ncol = legend_ncol_from_n_entries(len(jl_legend_elements) + len(legend_elements))
-        ax.legend(
-            handles=combine_legend_handles_reynolds_block_first(
-                jl_legend_elements, legend_elements, ncol=_ncol
-            ),
-            ncol=_ncol,
-            **LEGEND_TOP_KWARGS,
-        )
+        apply_two_row_top_legend(ax, jl_legend_elements, legend_elements)
         add_theta_and_mean_uncertainty_text(
             ax,
             df_plot,
@@ -2906,7 +3231,7 @@ def generate_dpdzt_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
             col_mapping,
             uncertainty_key='U_dpdz_T',
             unit_latex=r'\mathrm{kPa/m}',
-            placement='top',
+            placement='bottom_right',
             fontsize=17,
             kind='kpa_per_m',
         )
@@ -2968,8 +3293,8 @@ def generate_alpha_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         line_styles, _ = get_series_line_and_marker_styles()
         flow_pattern_symbols = get_flow_pattern_symbols()
         alpha_unc_col = _find_point_uncertainty_column(df_plot, col_mapping, 'U_alpha')
-        highest_resl_uncertainty_indices = _selected_highest_indices(
-            _one_col_series(df_plot, 'Re_sl_group'),
+        lowest_resl_uncertainty_indices = _indices_for_lowest_resl_series(
+            df_plot,
             _one_col_series(df_plot, 'Re_sg'),
             _one_col_series(df_plot, alpha_col),
         )
@@ -2977,7 +3302,7 @@ def generate_alpha_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         legend_series_meta = []
 
         for i, re_l in enumerate(Re_sl_series):
-            mask = df_plot['Re_sl_group'] == re_l
+            mask = _mask_re_sl_group(df_plot['Re_sl_group'], re_l)
 
             alpha_data = _one_col_series_masked(df_plot, mask, alpha_col)
             flow_pattern_data = _one_col_series_masked(df_plot, mask, flow_pattern_col)
@@ -3019,7 +3344,7 @@ def generate_alpha_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
                         c=p_color,
                         marker=symbol,
                         s=100,
-                        edgecolors='black',
+                        edgecolors=p_color,
                         linewidth=1,
                         zorder=2,
                     )
@@ -3029,13 +3354,13 @@ def generate_alpha_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         n_unc = _plot_selected_y_uncertainty(
             ax,
             df_plot,
-            highest_resl_uncertainty_indices,
+            lowest_resl_uncertainty_indices,
             'Re_sg',
             alpha_col,
             alpha_unc_col,
         )
         if n_unc:
-            print(f"Incerteza de alpha incluida nos {n_unc} pontos de maior Re_sl.")
+            print(f"Incerteza de alpha incluida nos {n_unc} pontos de menor Re_sl.")
 
         legend_elements = flow_pattern_legend_handles(
             df_plot, flow_pattern_col, flow_pattern_symbols
@@ -3044,19 +3369,11 @@ def generate_alpha_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         ax.set_xlabel(r'$Re_{sg}$ [-]', fontsize=26, fontfamily='serif')
         ax.set_ylabel(r'$\alpha$ [-]', fontsize=26, fontfamily='serif')
         style_axes_re_g_log_x(ax, y_major_step=0.1, y_lim_bottom=0, y_lim_top=1.0)
+        configure_alpha_y_axis_ticks(ax)
 
         Re_sl_legend_elements = re_sl_legend_handles_from_meta(legend_series_meta)
 
-        _ncol = legend_ncol_from_n_entries(len(Re_sl_legend_elements) + len(legend_elements))
-        combined_leg = combine_legend_handles_reynolds_block_first(
-            Re_sl_legend_elements, legend_elements, ncol=_ncol
-        )
-        if combined_leg:
-            ax.legend(
-                handles=combined_leg,
-                ncol=_ncol,
-                **LEGEND_TOP_KWARGS,
-            )
+        apply_two_row_top_legend(ax, Re_sl_legend_elements, legend_elements)
         add_theta_and_mean_uncertainty_text(
             ax,
             df_plot,
@@ -3127,15 +3444,15 @@ def generate_dpdzf_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         line_styles, _ = get_series_line_and_marker_styles()
         flow_pattern_symbols = get_flow_pattern_symbols()
         dp_dz_f_unc_col = _find_point_uncertainty_column(df_plot, col_mapping, 'U_dpdz_F')
-        highest_resl_uncertainty_indices = _selected_highest_indices(
-            _one_col_series(df_plot, 'Re_sl_group'),
+        lowest_resl_uncertainty_indices = _indices_for_lowest_resl_series(
+            df_plot,
             _one_col_series(df_plot, 'Re_sg'),
             _one_col_series(df_plot, dp_dz_f_col),
         )
         legend_series_meta = []
 
         for i, re_l in enumerate(Re_sl_series):
-            mask = df_plot['Re_sl_group'] == re_l
+            mask = _mask_re_sl_group(df_plot['Re_sl_group'], re_l)
 
             frictional_data = _one_col_series_masked(df_plot, mask, dp_dz_f_col)
             flow_pattern_data = _one_col_series_masked(df_plot, mask, flow_pattern_col)
@@ -3177,7 +3494,7 @@ def generate_dpdzf_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
                         c=color,
                         marker=symbol,
                         s=100,
-                        edgecolors='black',
+                        edgecolors=color,
                         linewidth=1,
                         zorder=2,
                     )
@@ -3187,14 +3504,14 @@ def generate_dpdzf_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         n_unc = _plot_selected_y_uncertainty(
             ax,
             df_plot,
-            highest_resl_uncertainty_indices,
+            lowest_resl_uncertainty_indices,
             'Re_sg',
             dp_dz_f_col,
             dp_dz_f_unc_col,
             y_scale=1 / 1000,
         )
         if n_unc:
-            print(f"Incerteza de gradiente friccional incluida nos {n_unc} pontos de maior Re_sl.")
+            print(f"Incerteza de gradiente friccional incluida nos {n_unc} pontos de menor Re_sl.")
 
         legend_elements = flow_pattern_legend_handles(
             df_plot, flow_pattern_col, flow_pattern_symbols
@@ -3202,17 +3519,18 @@ def generate_dpdzf_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
 
         ax.set_xlabel(r'$Re_{sg}$ [-]', fontsize=26, fontfamily='serif')
         ax.set_ylabel(YLABEL_DP_DZ_F, fontsize=26, fontfamily='serif')
-        style_axes_re_g_log_x(ax, y_major_step=0.5, y_lim_bottom=0, y_lim_top=None)
+        y_lo, y_hi = dpdz_y_limits_for_plot('f')
+        y_step = dpdz_y_major_step_for_plot('f')
+        if y_lo is not None or y_hi is not None:
+            style_axes_re_g_log_x(
+                ax, y_major_step=y_step, y_lim_bottom=y_lo, y_lim_top=y_hi
+            )
+            configure_dpdz_y_axis_minor_ticks(ax)
+        else:
+            style_axes_re_g_log_x(ax, y_major_step=0.5, y_lim_bottom=0, y_lim_top=None)
 
         Re_sl_legend_elements = re_sl_legend_handles_from_meta(legend_series_meta)
-        _ncol = legend_ncol_from_n_entries(len(Re_sl_legend_elements) + len(legend_elements))
-        ax.legend(
-            handles=combine_legend_handles_reynolds_block_first(
-                Re_sl_legend_elements, legend_elements, ncol=_ncol
-            ),
-            ncol=_ncol,
-            **LEGEND_TOP_KWARGS,
-        )
+        apply_two_row_top_legend(ax, Re_sl_legend_elements, legend_elements)
         add_theta_and_mean_uncertainty_text(
             ax,
             df_plot,
@@ -3283,15 +3601,15 @@ def generate_dpdzt_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         line_styles, _ = get_series_line_and_marker_styles()
         flow_pattern_symbols = get_flow_pattern_symbols()
         dp_dz_t_unc_col = _find_point_uncertainty_column(df_plot, col_mapping, 'U_dpdz_T')
-        highest_resl_uncertainty_indices = _selected_highest_indices(
-            _one_col_series(df_plot, 'Re_sl_group'),
+        lowest_resl_uncertainty_indices = _indices_for_lowest_resl_series(
+            df_plot,
             _one_col_series(df_plot, 'Re_sg'),
             _one_col_series(df_plot, dp_dz_t_col),
         )
         legend_series_meta = []
 
         for i, re_l in enumerate(Re_sl_series):
-            mask = df_plot['Re_sl_group'] == re_l
+            mask = _mask_re_sl_group(df_plot['Re_sl_group'], re_l)
 
             total_data = _one_col_series_masked(df_plot, mask, dp_dz_t_col)
             flow_pattern_data = _one_col_series_masked(df_plot, mask, flow_pattern_col)
@@ -3333,7 +3651,7 @@ def generate_dpdzt_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
                         c=color,
                         marker=symbol,
                         s=100,
-                        edgecolors='black',
+                        edgecolors=color,
                         linewidth=1,
                         zorder=2,
                     )
@@ -3343,14 +3661,14 @@ def generate_dpdzt_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
         n_unc = _plot_selected_y_uncertainty(
             ax,
             df_plot,
-            highest_resl_uncertainty_indices,
+            lowest_resl_uncertainty_indices,
             'Re_sg',
             dp_dz_t_col,
             dp_dz_t_unc_col,
             y_scale=1 / 1000,
         )
         if n_unc:
-            print(f"Incerteza de gradiente total incluida nos {n_unc} pontos de maior Re_sl.")
+            print(f"Incerteza de gradiente total incluida nos {n_unc} pontos de menor Re_sl.")
 
         legend_elements = flow_pattern_legend_handles(
             df_plot, flow_pattern_col, flow_pattern_symbols
@@ -3358,18 +3676,19 @@ def generate_dpdzt_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
 
         ax.set_xlabel(r'$Re_{sg}$ [-]', fontsize=26, fontfamily='serif')
         ax.set_ylabel(YLABEL_DP_DZ_T, fontsize=26, fontfamily='serif')
-        # Total: não forçar y ≥ 0 (gradiente pode ser negativo); ticks Y automáticos.
-        style_axes_re_g_log_x(ax, y_major_step=None, y_lim_bottom=None, y_lim_top=None)
+        y_lo, y_hi = dpdz_y_limits_for_plot('t')
+        y_step = dpdz_y_major_step_for_plot('t')
+        if y_lo is not None or y_hi is not None:
+            style_axes_re_g_log_x(
+                ax, y_major_step=y_step, y_lim_bottom=y_lo, y_lim_top=y_hi
+            )
+            configure_dpdz_y_axis_minor_ticks(ax)
+        else:
+            # Total: não forçar y ≥ 0 (gradiente pode ser negativo); ticks Y automáticos.
+            style_axes_re_g_log_x(ax, y_major_step=None, y_lim_bottom=None, y_lim_top=None)
 
         Re_sl_legend_elements = re_sl_legend_handles_from_meta(legend_series_meta)
-        _ncol = legend_ncol_from_n_entries(len(Re_sl_legend_elements) + len(legend_elements))
-        ax.legend(
-            handles=combine_legend_handles_reynolds_block_first(
-                Re_sl_legend_elements, legend_elements, ncol=_ncol
-            ),
-            ncol=_ncol,
-            **LEGEND_TOP_KWARGS,
-        )
+        apply_two_row_top_legend(ax, Re_sl_legend_elements, legend_elements)
         add_theta_and_mean_uncertainty_text(
             ax,
             df_plot,
@@ -3377,7 +3696,7 @@ def generate_dpdzt_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
             col_mapping,
             uncertainty_key='U_dpdz_T',
             unit_latex=r'\mathrm{kPa/m}',
-            placement='top',
+            placement='bottom_right',
             fontsize=17,
             kind='kpa_per_m',
         )
@@ -3445,43 +3764,13 @@ def create_orientation_summary_dataframe(all_dataframes, selected_sheets):
         alpha_col = col_mapping.get('α', None)
         dp_dz_t_col = col_mapping.get('dp/dz_T', None)
 
-        # Garantir Re_sg disponível (para cálculo de Re_sg médio por série e legenda)
-        if 'Re_sg' in df.columns:
-            Re_sg_series = pd.to_numeric(df['Re_sg'], errors='coerce')
-        else:
-            # Tentar calcular Re_sg usando jG, Temp e Pressure (nomes podem variar, ex.: NAS)
+        # Re_sg: mesma regra que nos plots *_vs_Re_g (Rho_gas/Mu_gas quando existirem)
+        try:
+            compute_Re_sg_column(df_temp, col_mapping, fluid_1)
+            Re_sg_series = pd.to_numeric(df_temp['Re_sg'], errors='coerce')
+        except Exception as e:
             Re_sg_series = pd.Series([np.nan] * len(df_temp), index=df_temp.index)
-            try:
-                # Buscar colunas por qualquer nome usado no NAS ou formato padrão
-                def _find_col(*candidates):
-                    for k in candidates:
-                        if k in col_mapping:
-                            return col_mapping[k]
-                    norm = {str(k).strip().upper(): col_mapping[k] for k in col_mapping}
-                    for c in candidates:
-                        if c.upper() in norm:
-                            return norm[c.upper()]
-                    return None
-                jg_col = _find_col('jG', 'JG')
-                T_col = _find_col('Temp.', 'Temp', 'T', 'T (C)', 'T(°C)')
-                P_col = _find_col('Gauge Pressure', 'Gauge P', 'Gauge P.', 'P', 'Pressure', 'Gauge P (kPa)', 'P (kPa)')
-                if jg_col is not None and T_col is not None and P_col is not None:
-                    P_vals = pd.to_numeric(df[P_col], errors='coerce')
-                    T_vals = pd.to_numeric(df[T_col], errors='coerce')
-                    P_Pa = P_vals + 101325
-                    T_K = T_vals + 273.15
-                    rho_G, mu_G = _gas_density_viscosity_arrays(P_Pa, T_K, fluid_1)
-                    Re_sg_series = pd.Series(
-                        rho_G
-                        * pd.to_numeric(df[jg_col], errors='coerce').to_numpy()
-                        * PIPE_DIAMETER_M
-                        / mu_G,
-                        index=df.index,
-                    )
-                else:
-                    print(f"Aviso: não foi possível calcular Re_sg para {sheet_name} (colunas ausentes: jG/Temp/Pressure).")
-            except Exception as e:
-                print(f"Erro ao calcular Re_sg para {sheet_name}: {e}")
+            print(f"Erro ao calcular Re_sg para {sheet_name}: {e}")
 
         # Converter friccional e total para kPa/m e manter todos os pontos individuais
         # Garantir que os dados sejam numéricos (NAS_file pode trazer strings ou colunas duplicadas)
@@ -3672,6 +3961,8 @@ def _generate_orientation_plot_for_quantity(
     y_column,
     y_label,
     base_name_prefix,
+    *,
+    integer_x_axis=False,
 ):
     """
     Gera gráficos genéricos de (quantidade y_column) vs orientação θ para cada Re_sl,
@@ -3744,7 +4035,7 @@ def _generate_orientation_plot_for_quantity(
                             c=pattern_color,
                             marker=symbol,
                             s=150,
-                            edgecolors=color,
+                            edgecolors=pattern_color,
                             linewidth=1.5,
                             zorder=2,
                             alpha=0.9,
@@ -3813,7 +4104,7 @@ def _generate_orientation_plot_for_quantity(
                         c=pattern_color,
                         marker=symbol,
                         s=150,
-                        edgecolors='black',
+                        edgecolors=pattern_color,
                         linewidth=1.5,
                         zorder=2,
                         alpha=0.9,
@@ -3871,7 +4162,11 @@ def _generate_orientation_plot_for_quantity(
         # Limites e ticks Y para void fraction (como alpha_vs_jg)
         if y_column == 'alpha':
             ax.set_ylim(bottom=0.0, top=1.0)
-            ax.yaxis.set_major_locator(MultipleLocator(0.1))
+            configure_alpha_y_axis_ticks(ax)
+        elif y_column == 'frictional':
+            apply_fixed_dpdz_y_axis(ax, 'f')
+        elif y_column == 'total':
+            apply_fixed_dpdz_y_axis(ax, 't')
 
         used_labels = {
             flow_pattern_display_label(v) for v in data_re['flow_pattern']
@@ -3889,27 +4184,17 @@ def _generate_orientation_plot_for_quantity(
                     color='w',
                     markerfacecolor=color,
                     markersize=8,
-                    markeredgecolor='black',
+                    markeredgecolor=color,
                     markeredgewidth=1,
-                    label=pattern,
+                    label=flow_pattern_legend_label(pattern),
                 )
             )
 
         apply_subtle_gray_grid(ax)
 
-        _apply_linear_axes_one_decimal_format(ax)
+        _apply_linear_axes_one_decimal_format(ax, integer_x=integer_x_axis)
 
-        _ncol = legend_ncol_from_n_entries(
-            len(series_legend_elements) + len(pattern_legend_elements)
-        )
-        combined_handles = combine_legend_handles_reynolds_block_first(
-            series_legend_elements, pattern_legend_elements, ncol=_ncol
-        )
-        ax.legend(
-            handles=combined_handles,
-            ncol=_ncol,
-            **LEGEND_TOP_KWARGS,
-        )
+        apply_two_row_top_legend(ax, series_legend_elements, pattern_legend_elements)
 
         # Reynolds de líquido nominal (Re_sl), arredondado à centena (mesmo que *_vs_Re_g).
         # Frictional e total: centro inferior; alpha: canto inferior direito.
@@ -3997,6 +4282,7 @@ def generate_frictional_vs_orientation_plot(all_dataframes, selected_sheets, uni
             y_column='frictional',
             y_label=YLABEL_DP_DZ_F,
             base_name_prefix='frictional_vs_orientation',
+            integer_x_axis=True,
         )
     except Exception as e:
         print(f"Erro ao gerar plots de fricção vs orientação: {e}")
@@ -4023,6 +4309,7 @@ def generate_alpha_vs_orientation_plot(all_dataframes, selected_sheets, units_di
             y_column='alpha',
             y_label=r'$\alpha$ [-]',
             base_name_prefix='alpha_vs_orientation',
+            integer_x_axis=True,
         )
     except Exception as e:
         print(f"Erro ao gerar plots de alpha vs orientação: {e}")
@@ -4049,6 +4336,7 @@ def generate_total_vs_orientation_plot(all_dataframes, selected_sheets, units_di
             y_column='total',
             y_label=YLABEL_DP_DZ_T,
             base_name_prefix='total_vs_orientation',
+            integer_x_axis=True,
         )
     except Exception as e:
         print(f"Erro ao gerar plots de gradiente total vs orientação: {e}")

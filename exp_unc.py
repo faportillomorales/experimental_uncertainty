@@ -313,11 +313,11 @@ def uncertainties_calc(resumo_df,window_df):
         termo_gravitacional = (rho_mistura - rho_tubbing) * g * sin_theta
         if direction in ['Upward']:
             dPf_dz = (dP_yokogawa/L_) - termo_gravitacional
-            dPt_dz = dPf_dz + dPg_dz
+            dPt_dz = abs(dPf_dz) + abs(dPg_dz)
         elif direction in ['Downward','Horizontal']:
             print('Downward')
             dPf_dz = -(dP_yokogawa/L_) + termo_gravitacional
-            dPt_dz = -(abs(dPf_dz)) + dPg_dz
+            dPt_dz = abs(dPf_dz) - abs(dPg_dz)
         
         print(f'dPf_dz (Yokogawa): {dPf_dz:.3f}')
         print(f'dPg_dz: {dPg_dz:.3f}')
@@ -585,10 +585,10 @@ def save_results(df: pd.DataFrame, coluna_escolhida: str, start_idx: int, end_id
             dP_F_series = window_data[dP_F_col]
             dP_F_RMS = np.sqrt(np.mean(np.square(dP_F_series)))
             grav_term = medias_janela['dP_F/dz dP_dz_gravitacional']
-            if direction in ['Upward', 'Horizontal']:
+            if direction in ['Upward']:
                 dP_dz_total = dP_F_RMS + grav_term
-            else:
-                dP_dz_total = -dP_F_RMS + grav_term
+            elif direction in ['Downward', 'Horizontal']:
+                dP_dz_total = dP_F_RMS - grav_term
             medias_corrigidas.append(dP_dz_total)
             dP_dz_total_values[col] = dP_dz_total
         elif col.startswith('PDT-'):
@@ -990,7 +990,10 @@ def calc_frictional_pressure_gradient(df, colunas, start_idx, end_idx, best_wind
             dP_F_over_dz_series = -(delta_p_prime / comprimento) + termo_gravitacional 
             dP_F_over_dz_RMS = np.sqrt(np.mean(np.square(dP_F_over_dz_series)))
             dP_dz_total = dP_F_over_dz_RMS - dP_dz_gravitacional_mean
-
+        # print(f'dP_F_over_dz_RMS: {dP_F_over_dz_RMS:.3f}')
+        # print(f'dP_dz_gravitacional_mean: {dP_dz_gravitacional_mean:.3f}')
+        # print(f'dP_dz_total: {dP_dz_total:.3f}')
+        # exit()
         dP_F_df[coluna_pdt_nome] = dP_F_over_dz_series
         dP_F_df[f'dP_dz_total_{coluna_pdt_nome}'] = dP_dz_total
         if i == indices_pdt[0]:
@@ -1018,7 +1021,7 @@ def extract_info_from_filename(filename: str):
         'W': 'Water',
         'O': 'Oil',
         'S': 'SF6',
-        'D': 'Dense Fluid'
+        'D': 'Dense Liquid'
     }
     direction_map = {
         'H': 'Horizontal',
