@@ -10,7 +10,7 @@ import sys
 ####################################################################################################################################################
 #                                            INPUTS
 ####################################################################################################################################################
-file_path = 'data_example/example/SF6/SOD30P05/SOD30P05' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
+file_path = 'H:/Meu Drive/LEMI/uncertainties/data_example/example/ADD90P01/ADD90P01' #Insira o caminho do arquivo a ser analisado NOTE: USE SEMPRE A BARRA NORMAL '/', SE ESTIVER INVERTIDA, MODIFIQUE-A
 
 Di = 0.05251     # m diâmetro interno da tubulação (para número de Reynolds)
 L = 1.70         # m comprimento entre as tomadas de diferencial de pressão
@@ -28,21 +28,21 @@ sensor_Endress_mid = 'PDT-M-0101C-3kPa(Pa)'
 sensor_Endress_top = 'PDT-M-0101-40kPa(Pa)'
 sensor_Endress_bottom = 'PDT-M-0101B-10kPa(Pa)'
 
-pressao_mesa = 'PIT-M-0301(bar)'
-temperatura_mesa = 'TIT-M-0301(C)'
+pressao_mesa = 'PIT-M-0101(bar)'
+temperatura_mesa = 'TIT-M-0101(C)'
 
 pressao_parede = 'PIT-S-0501(bar)'
 temperatura_parede = 'TIT-S-0501(C)'
 ### Colunas de interesse -> Insira o nome das colunas a plotar e avaliar do arquivo .dat
 # Lista de colunas para análise: [nome_coluna, apelido, unidade]
 colunas_analise = [
-    [sensor_Endress_top, r'\Delta P_{40\,kPa} / L2', r'[Pa/m] (top)'],
-    [sensor_Endress_mid, r'\Delta P_{3\,kPa} / L', r'[Pa/m] (mid)'],
-    [sensor_Endress_bottom, r'\Delta P_{10\,kPa} / L2', r'[Pa/m] (bottom)'],
+    # [sensor_Endress_top, r'\Delta P_{40\,kPa} / L2', r'[Pa/m] (top)'],
+    # [sensor_Endress_mid, r'\Delta P_{3\,kPa} / L', r'[Pa/m] (mid)'],
+    # [sensor_Endress_bottom, r'\Delta P_{10\,kPa} / L2', r'[Pa/m] (bottom)'],
     ['Alpha', r'\alpha', r''],
     [sensor_Yokogawa_mid, r'\Delta P_{10\,kPa} / L', r'[Pa/m] (mid)'],
-    ['J_Oil(m/s)', r'J_{oil}', r'[m/s]'],
-    ['J_SF6(m/s)', r'J_{SF_6}', r'[m/s]'],
+    ['J_Dense-Liquid(m/s)', r'J_{oil}', r'[m/s]'],
+    ['J_Air(m/s)', r'J_{SF_6}', r'[m/s]'],
     #[pressao_mesa, r'Gauge\ Pressure', r'[Bar]'],
     [temperatura_mesa, r'Temperature', r'[°C]'],
     ['rho_g', r'\rho_{SF_6}', r'[kg/m³]'],
@@ -76,6 +76,8 @@ def calc_liquid_density(temp_celsius, fluid_2):
         # return -0.65178 * temp_celsius + 879.76961:
         # return 0.031267*temp_celsius**2 - 3.2050*temp_celsius + 97.6594 #Viscosity model
         return 0.0008*temp_celsius**2 - 0.698*temp_celsius + 879.154
+    elif fluid_2 ==  'Dense-Liquid':
+        return 1476.0 # kg/m³  #### DENSIDADE DO Dense-Liquid FIXA
     else:
         return 1000  # Valor padrão
 
@@ -95,9 +97,12 @@ def calc_liquid_viscosity(temp_celsius, fluid_2):
         # Equação em cP; converter para Pa·s (1 cP = 1e-3 Pa·s)
         mu_cp = 0.031267 * (temp_celsius**2) - 3.2050 * temp_celsius + 97.6594
         return mu_cp * 1e-3
+    elif fluid_2 ==  'Dense-Liquid':
+        mu_cp = 0.0422*temp_celsius**2 - 3.7457*temp_celsius + 103.55
+        return mu_cp * 1e-3
     else:
         return 1e-3  # Valor padrão (água aproximada) em Pa·s
-
+ 
 
 def find_min_std_window(df: pd.DataFrame, column_name: str, min_window_size: float, max_window_size: float):
     """
@@ -292,7 +297,14 @@ def uncertainties_calc(resumo_df,window_df):
     elif fluid_2 == 'Oil':
         rho_L = 0.0008*(T**2) - 0.698*T + 879.154
         print('rho_óleo')
-    u_rho_l = rho_L.std_dev
+    elif fluid_2 == 'Dense-Liquid':
+        rho_L = 1476.0          #### DENSIDADE DO Dense-Liquid FIXA
+        print('rho_Dense-Liquid')#### DENSIDADE DO Dense-Liquid FIXA
+    
+    if fluid_2 == 'Dense-Liquid':#### DENSIDADE DO Dense-Liquid FIXA
+        u_rho_l = 0.0#### DENSIDADE DO Dense-Liquid FIXA
+    else:#### DENSIDADE DO Dense-Liquid FIXA
+        u_rho_l = rho_L.std_dev
     print('u_rho_l: ', rho_L)
 
     rho_tubbing = rho_s
@@ -990,10 +1002,7 @@ def calc_frictional_pressure_gradient(df, colunas, start_idx, end_idx, best_wind
             dP_F_over_dz_series = -(delta_p_prime / comprimento) + termo_gravitacional 
             dP_F_over_dz_RMS = np.sqrt(np.mean(np.square(dP_F_over_dz_series)))
             dP_dz_total = dP_F_over_dz_RMS - dP_dz_gravitacional_mean
-        # print(f'dP_F_over_dz_RMS: {dP_F_over_dz_RMS:.3f}')
-        # print(f'dP_dz_gravitacional_mean: {dP_dz_gravitacional_mean:.3f}')
-        # print(f'dP_dz_total: {dP_dz_total:.3f}')
-        # exit()
+       
         dP_F_df[coluna_pdt_nome] = dP_F_over_dz_series
         dP_F_df[f'dP_dz_total_{coluna_pdt_nome}'] = dP_dz_total
         if i == indices_pdt[0]:
@@ -1021,7 +1030,7 @@ def extract_info_from_filename(filename: str):
         'W': 'Water',
         'O': 'Oil',
         'S': 'SF6',
-        'D': 'Dense Liquid'
+        'D': 'Dense-Liquid'
     }
     direction_map = {
         'H': 'Horizontal',
@@ -1277,7 +1286,7 @@ if __name__ == "__main__":
                 except Exception:
                     pass
     # Densidade e viscosidade do líquido (CoolProp para Water, equações para Oil) e número de Reynolds
-    if temperatura_mesa in df.columns and fluid_2 in ['Water', 'Oil']:
+    if temperatura_mesa in df.columns and fluid_2 in ['Water', 'Oil', 'Dense-Liquid']:
         df['rho_liquido'] = calc_liquid_density(df[temperatura_mesa], fluid_2)
         df['mu_liquido'] = calc_liquid_viscosity(df[temperatura_mesa], fluid_2)
 

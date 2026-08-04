@@ -1,19 +1,18 @@
 """
-Ferramentas de leitura de dados experimentais e geração de figuras (plot_tool V4).
+Ferramentas de leitura de dados experimentais e geração de figuras (plot_tool V9).
 
 O script segue um fluxo único: configurar ``file_path`` / ``NAS_file``, carregar o Excel,
 padronizar colunas quando aplicável e gravar PDF/PNG por tipo de gráfico e por aba.
 """
 from contextlib import redirect_stderr
+from functools import wraps
 import os
+import traceback
 import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
-from matplotlib.legend import Legend
-from matplotlib.legend_handler import HandlerBase
-from matplotlib.lines import Line2D
 from matplotlib.ticker import FuncFormatter, MultipleLocator
 import numpy as np
 import pandas as pd
@@ -27,6 +26,10 @@ NAS_file = False
 
 #insira o diâmetro da tubulação em metros
 PIPE_DIAMETER_M = 0.05251
+
+# Conversão Pa/m → kPa/m nos eixos de gradiente
+PA_TO_KPA = 1000.0
+SCATTER_FLOW_PATTERN_SIZE = 100
 
 #Fix plot limits
 FIX_PLOT_LIMITS = True
@@ -148,14 +151,8 @@ def canonical_flow_pattern_name(val):
     """Nome canónico para símbolo/cor/legenda (célula vazia → Unclassified)."""
     if _is_blank_excel_value(val):
         return FLOW_PATTERN_UNCLASSIFIED
-    if isinstance(val, str) and val.strip() == '':
-        return FLOW_PATTERN_UNCLASSIFIED
     s = str(val).strip()
-    key = s.upper()
-    if key in NAS_FLOW_PATTERN_MAP:
-        name = NAS_FLOW_PATTERN_MAP[key]
-    else:
-        name = NAS_FLOW_PATTERN_MAP.get(key, s)
+    name = NAS_FLOW_PATTERN_MAP.get(s.upper(), s)
     alias = _FLOW_PATTERN_CANONICAL_ALIASES.get(str(name).strip().lower())
     if alias:
         return alias
@@ -180,49 +177,6 @@ def _build_flow_pattern_sigla_by_name():
 FLOW_PATTERN_SIGLA_BY_NAME = _build_flow_pattern_sigla_by_name()
 
 
-class LegendGridPlaceholder(Line2D):
-    """
-    Proxy só para identificação no ``handler_map``. Subclasse de Line2D para não colidir
-    com patches usados em outros contextos.
-    """
-
-    def __init__(self):
-        super().__init__(
-            [],
-            [],
-            linestyle='none',
-            marker='',
-            linewidth=0,
-            color=(1, 1, 1, 0),
-            label=' ',
-        )
-
-
-class HandlerLegendGridPlaceholder(HandlerBase):
-    """
-    Desenha apenas uma linha com espessura 0 e cor RGBA (0,0,0,0); os backends AGG/PDF
-    normalmente não rasterizam isso (ao contrário de Patch com ``edgecolor='none'``,
-    que por vezes deixa um traço de 1 px por anti-aliasing).
-    """
-
-    def create_artists(self, legend, orig_handle, xdescent, ydescent, width, height, fontsize, trans):
-        yc = (height - ydescent) * 0.5
-        line = Line2D(
-            (-xdescent, -xdescent + width),
-            (yc, yc),
-            linewidth=0,
-            linestyle='solid',
-            color=(0, 0, 0, 0),
-            antialiased=False,
-            solid_capstyle='butt',
-        )
-        line.set_transform(trans)
-        return [line]
-
-
-Legend.update_default_handler_map({
-    LegendGridPlaceholder: HandlerLegendGridPlaceholder(),
-})
 
 
 # Suprimir avisos específicos do pandas
@@ -239,7 +193,6 @@ LEGEND_TOP_KWARGS = {
     'frameon': False,
     'fontsize': 20,
     'prop': {'family': 'serif'},
-    'handler_map': {LegendGridPlaceholder: HandlerLegendGridPlaceholder()},
 }
 LEGEND_TOP_NCOL = 4
 # Legenda de flow patterns nos plots de orientação (modo ``all``): ligeiramente menor que o padrão.
@@ -714,12 +667,8 @@ def _is_empty_measurement_cell(x):
     """
     if _is_blank_excel_value(x):
         return True
-    if isinstance(x, str):
-        t = x.strip()
-        if not t:
-            return True
-        if t.lower() in _MEASUREMENT_PLACEHOLDER_STRINGS:
-            return True
+    if isinstance(x, str) and x.strip().lower() in _MEASUREMENT_PLACEHOLDER_STRINGS:
+        return True
     return False
 
 
@@ -970,87 +919,6 @@ def read_single_sheet_nas(file_path, sheet_name):
         print(f"Erro ao ler aba NAS {sheet_name}: {e}")
         return None, None
 
-def save_dataframe_to_txt(df, units_dict, output_file, sheet_name=None):
-    """
-    Salva o DataFrame em formato de tabela em um arquivo .txt
-    
-    Args:
-        df (pd.DataFrame): DataFrame para salvar
-        units_dict (dict): Dicionário com as unidades das colunas
-        output_file (str): Nome do arquivo de saída
-        sheet_name (str): Nome da aba (opcional)
-    """
-    try:
-        with open(output_file, 'w', encoding='utf-8') as f:
-            # Cabeçalho
-            f.write("=" * 80 + "\n")
-            f.write("DADOS DO ARQUIVO EXCEL\n")
-            f.write("=" * 80 + "\n")
-            
-            if sheet_name:
-                f.write(f"Aba: {sheet_name}\n")
-            
-            f.write(f"Data/hora de geração: {pd.Timestamp.now()}\n")
-            f.write(f"Dimensões: {df.shape[0]} linhas x {df.shape[1]} colunas\n\n")
-            
-            # Informações das colunas e unidades
-            f.write("COLUNAS E UNIDADES:\n")
-            f.write("-" * 50 + "\n")
-            for col in df.columns:
-                unit = units_dict.get(col, "")
-                f.write(f"{col}: {unit}\n")
-            f.write("\n")
-            
-            # Dados em formato de tabela
-            f.write("DADOS:\n")
-            f.write("-" * 50 + "\n")
-            
-            # Calcular larguras das colunas
-            col_widths = {}
-            for col in df.columns:
-                # Largura mínima baseada no nome da coluna
-                col_widths[col] = len(str(col))
-                
-                # Verificar largura dos dados
-                for value in df[col].head(100):  # Verificar apenas as primeiras 100 linhas
-                    col_widths[col] = max(col_widths[col], len(str(value)))
-                
-                # Limitar largura máxima
-                col_widths[col] = min(col_widths[col], 20)
-            
-            # Cabeçalho da tabela
-            header_line = "|"
-            separator_line = "|"
-            for col in df.columns:
-                header_line += f" {col:<{col_widths[col]}} |"
-                separator_line += "-" * (col_widths[col] + 2) + "|"
-            
-            f.write(header_line + "\n")
-            f.write(separator_line + "\n")
-            
-            # Dados da tabela
-            for idx, row in df.iterrows():
-                data_line = "|"
-                for col in df.columns:
-                    value = str(row[col])
-                    if len(value) > col_widths[col]:
-                        value = value[:col_widths[col]-3] + "..."
-                    data_line += f" {value:<{col_widths[col]}} |"
-                f.write(data_line + "\n")
-                
-                # Limitar o número de linhas para não sobrecarregar o arquivo
-                if idx >= 1000:  # Máximo 1000 linhas
-                    f.write(f"\n... (mostrando apenas as primeiras 1000 linhas de {len(df)})\n")
-                    break
-            
-            f.write("\n" + "=" * 80 + "\n")
-            f.write("FIM DOS DADOS\n")
-            f.write("=" * 80 + "\n")
-        
-        print(f"DataFrame salvo em: {output_file}")
-        
-    except Exception as e:
-        print(f"Erro ao salvar arquivo: {e}")
 
 def analyze_dataframe(df):
     """
@@ -1342,6 +1210,22 @@ def missing_column_keys(col_mapping, required_keys):
     return [k for k in required_keys if k not in col_mapping]
 
 
+def _print_missing_plot_columns(message, col_mapping):
+    """Mensagem padrão de colunas ausentes + chaves disponíveis no mapeamento."""
+    print(message)
+    print(f'Colunas disponíveis: {list(col_mapping.keys())}')
+
+
+def _sorted_finite_unique(values):
+    """Valores únicos ordenados, excluindo NaN/NA (útil para séries de jL / Re_sl)."""
+    return [v for v in sorted(pd.Series(values).dropna().unique()) if pd.notna(v)]
+
+
+def _jl_legend_series_means(df_plot):
+    """Médias de grupo jL já gravadas em ``_jl_legend_group_mean`` (únicas, ordenadas)."""
+    return _sorted_finite_unique(df_plot['_jl_legend_group_mean'])
+
+
 def ensure_alpha_in_column_mapping(col_mapping, columns_iterable):
     """
     Garante col_mapping['α'] a partir de nomes alternativos (NAS / Excel).
@@ -1532,29 +1416,6 @@ def _indices_for_lowest_resl_series(df_plot, x_series, y_series):
     return list(df_plot.index[sel])
 
 
-def _selected_lowest_condition_indices(selector_series, x_series, y_series):
-    """Retrocompat.: preferir ``_indices_for_lowest_jl_series`` / ``_indices_for_lowest_resl_series``."""
-    selector = pd.to_numeric(selector_series, errors='coerce')
-    x = pd.to_numeric(x_series, errors='coerce')
-    y = pd.to_numeric(y_series, errors='coerce')
-    valid = selector.notna() & x.notna() & y.notna()
-    if not bool(valid.any()):
-        return []
-    min_val = float(selector[valid].min())
-    in_min = valid & np.isclose(selector, min_val, rtol=0, atol=1e-6)
-    return list(selector.index[in_min])
-
-
-def _selected_highest_indices(selector_series, x_series, y_series, n=4):
-    """Índices dos n pontos válidos com maior valor do selector (ordem estável)."""
-    selector = pd.to_numeric(selector_series, errors='coerce')
-    x = pd.to_numeric(x_series, errors='coerce')
-    y = pd.to_numeric(y_series, errors='coerce')
-    valid = selector.notna() & x.notna() & y.notna()
-    if not bool(valid.any()):
-        return []
-    return list(selector[valid].sort_values(kind='mergesort', ascending=False).head(n).index)
-
 
 def _plot_selected_y_uncertainty(ax, df_plot, indices, x_col, y_col, y_unc_col, y_scale=1.0):
     """Draw vertical uncertainty bars only on selected points."""
@@ -1638,30 +1499,15 @@ def add_theta_and_mean_uncertainty_text(
     except Exception:
         pass
     txt = '\n'.join(lines)
-    if placement == 'top':
-        xy = (0.03, 0.92)
-        ha = 'left'
-        va = 'top'
+    if placement in ('top', 'top_left'):
+        xy, ha, va = (0.03, 0.92), 'left', 'top'
     elif placement == 'top_right':
-        xy = (0.97, 0.92)
-        ha = 'right'
-        va = 'top'
-    elif placement == 'top_left':
-        xy = (0.03, 0.92)
-        ha = 'left'
-        va = 'top'
-    elif placement == 'bottom_right':
-        xy = (0.97, 0.03)
-        ha = 'right'
-        va = 'bottom'
+        xy, ha, va = (0.97, 0.92), 'right', 'top'
     elif placement == 'bottom_left':
-        xy = (0.03, 0.03)
-        ha = 'left'
-        va = 'bottom'
+        xy, ha, va = (0.03, 0.03), 'left', 'bottom'
     else:
-        xy = (0.97, 0.03)
-        ha = 'right'
-        va = 'bottom'
+        # 'bottom', 'bottom_right' e valores desconhecidos → canto inferior direito
+        xy, ha, va = (0.97, 0.03), 'right', 'bottom'
     ax.text(
         xy[0],
         xy[1],
@@ -1838,8 +1684,8 @@ def compute_Re_sg_column(df, col_mapping, fluid_1, D=PIPE_DIAMETER_M, units_dict
     df['Re_sg'] = pd.Series(rho * jg_vals * D / mu, index=df.index)
 
 
-def save_figure_to_sheet_dir(base_name, sheet_name):
-    """Guarda PDF e PNG em dirname(file_path)/sheet_name/."""
+def save_figure_to_sheet_dir(base_name, sheet_name, *, close=True):
+    """Guarda PDF e PNG em dirname(file_path)/sheet_name/; fecha a figura atual."""
     sheet_dir = os.path.join(os.path.dirname(file_path), sheet_name)
     os.makedirs(sheet_dir, exist_ok=True)
     pdf_file = os.path.join(sheet_dir, f'{base_name}.pdf')
@@ -1848,6 +1694,8 @@ def save_figure_to_sheet_dir(base_name, sheet_name):
     print(f'Plot PDF salvo: {pdf_file}')
     plt.savefig(png_file, format='png', **PLOT_SAVEFIG_KWARGS)
     print(f'Plot PNG salvo: {png_file}')
+    if close:
+        plt.close()
 
 
 def flow_pattern_legend_handles(df_plot, flow_pattern_col, flow_pattern_symbols=None):
@@ -2035,234 +1883,198 @@ def re_sl_legend_handles_from_meta(legend_series_meta):
     return out
 
 
-def _legend_grid_placeholder_handle():
-    """Handle invisível para ocupar células na grelha da legenda (alinhamento por ncol)."""
-    return LegendGridPlaceholder()
+
+def report_plot_errors(error_prefix='Erro ao gerar plot'):
+    """Decorator: captura exceções dos geradores, imprime traceback e continua."""
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as e:
+                print(f'{error_prefix}: {e}')
+                traceback.print_exc()
+        return wrapper
+    return decorator
 
 
-def combine_legend_handles_reynolds_block_first(
-    reynolds_handles,
-    tail_handles,
+def _scatter_flow_pattern_points(ax, x_vals, y_vals, flow_patterns, flow_pattern_symbols, *, s=None):
+    """Scatter um ponto por (x, y) com símbolo/cor do flow pattern."""
+    if s is None:
+        s = SCATTER_FLOW_PATTERN_SIZE
+    for x_val, y_val, flow_pattern in zip(x_vals, y_vals, flow_patterns):
+        pattern_data = style_for_flow_pattern_cell(flow_pattern, flow_pattern_symbols)
+        symbol = pattern_data['symbol']
+        color = pattern_data['color']
+        ax.scatter(
+            x_val,
+            y_val,
+            c=color,
+            marker=symbol,
+            s=s,
+            edgecolors=color,
+            linewidth=1,
+            zorder=2,
+        )
+
+
+def _jl_series_legend_handles(jl_series, line_styles):
+    """Handles de legenda $J_l$ = … m/s para cada série de jL."""
+    handles = []
+    for i, jl_lbl in enumerate(jl_series):
+        jl_disp = float(jl_lbl)
+        line_style = line_styles[i % len(line_styles)]
+        handles.append(
+            plt.Line2D(
+                [0],
+                [0],
+                color='black',
+                linestyle=line_style,
+                linewidth=1.5,
+                label=rf'$J_{{l}}$ = {jl_disp:.2f} m/s',
+            )
+        )
+    return handles
+
+
+def _plot_sorted_series_with_flow_patterns(
+    ax,
+    x_clean,
+    y_clean,
+    flow_pattern_clean,
+    line_style,
+    flow_pattern_symbols,
     *,
-    ncol=LEGEND_TOP_NCOL,
-    tail_ncol=None,
+    scatter_size=None,
 ):
+    """Ordena por X, desenha linha preta e scatters por flow pattern. Retorna n pontos."""
+    if len(x_clean) == 0:
+        return 0
+    sorted_data = sorted(zip(x_clean, y_clean, flow_pattern_clean))
+    x_sorted = [p[0] for p in sorted_data]
+    y_sorted = [p[1] for p in sorted_data]
+    fp_sorted = [p[2] for p in sorted_data]
+    ax.plot(x_sorted, y_sorted, line_style, color='black', linewidth=1.5, zorder=1)
+    _scatter_flow_pattern_points(
+        ax, x_sorted, y_sorted, fp_sorted, flow_pattern_symbols, s=scatter_size
+    )
+    return len(x_clean)
+
+
+def _iter_sheets_with_meta(df, sheet_name=None, fluid_1=None, fluid_2=None, theta=None):
     """
-    Coloca os handles da primeira lista (``Re_{sl}``, ``Re_{sg}``, ``J_l``, etc.)
-    nas primeira(s) linha(s) da grelha da legenda; as entradas seguintes (ex.: flow
-    patterns) ocupam as linhas posteriores.
-
-    ``ncol`` regula o bloco superior; ``tail_ncol`` (por omissão = ``ncol``) regula o
-    bloco inferior — tipicamente ``tail_ncol`` = número de padrões de escoamento para
-    uma única linha. A largura da grelha é ``max(ncol, tail_ncol)``.
-
-    O matplotlib constrói colunas empilhando blocos contíguos da lista linear de handles;
-    por isso é necessário converter uma grelha **linha a linha** para a ordem linear que
-    o legend usa (preencimento por colunas / ordem Fortran da matriz).
+    Yields (sheet_df, sheet_name, fluid_1, fluid_2, theta) para dict ou DataFrame único.
+    Para dict, reextrai meta do nome da aba (incl. sinal de Downward).
     """
-    head_ncol = ncol
-    if tail_ncol is None:
-        tail_ncol = head_ncol
-    grid_ncol = max(head_ncol, tail_ncol)
-
-    def _rows_from_handles(handles, block_ncol):
-        if not handles:
-            return []
-        h = list(handles)
-        rows = []
-        for i in range(0, len(h), block_ncol):
-            chunk = h[i : i + block_ncol]
-            if len(chunk) < grid_ncol:
-                chunk = chunk + [_legend_grid_placeholder_handle()] * (grid_ncol - len(chunk))
-            rows.append(chunk)
-        return rows
-
-    r_rows = _rows_from_handles(reynolds_handles, head_ncol)
-    t_rows = _rows_from_handles(tail_handles, tail_ncol)
-    if not r_rows:
-        all_rows = t_rows
-    elif not t_rows:
-        all_rows = r_rows
+    if isinstance(df, dict):
+        for name, sheet_df in df.items():
+            f1, f2, direction, th, _id, _is_val = extract_info_from_filename(name)
+            if direction == 'Downward':
+                th = -th
+            yield sheet_df, name, f1, f2, th
     else:
-        all_rows = r_rows + t_rows
-
-    if not all_rows:
-        return []
-
-    linear = []
-    for c in range(grid_ncol):
-        for r in range(len(all_rows)):
-            linear.append(all_rows[r][c])
-    return linear
+        yield df, sheet_name, fluid_1, fluid_2, theta
 
 
+def _run_plot_on_sheets(plot_fn, df, sheet_name=None, fluid_1=None, fluid_2=None, theta=None):
+    """Aplica ``plot_fn(sheet_df, name, f1, f2, th)`` a cada aba."""
+    for args in _iter_sheets_with_meta(df, sheet_name, fluid_1, fluid_2, theta):
+        plot_fn(*args)
+
+
+
+@report_plot_errors('Erro ao gerar plot')
 def generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
     """
     Gera um plot científico de jG vs α, onde cada jL é uma série diferente.
     Inclui símbolos diferentes para cada Flow Pattern.
-    
-    Args:
-        df (pd.DataFrame): DataFrame com os dados
-        sheet_name (str): Nome da aba/sheet
     """
-    try:
-        available_cols = list(df.columns)
-        col_mapping = build_column_mapping(df)
-        if not ensure_alpha_in_column_mapping(col_mapping, available_cols):
-            print('Colunas ausentes para plot jG vs α: α (ou Alpha / Void fraction)')
-            print(f'Colunas disponíveis: {list(col_mapping.keys())}')
-            return
-        miss = missing_column_keys(col_mapping, ['jG', 'jL', 'Flow Pattern'])
-        if miss:
-            print(f'Colunas ausentes para plot jG vs α: {miss}')
-            print(f'Colunas disponíveis: {list(col_mapping.keys())}')
-            return
-
-        setup_plot_style()
-        fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
-
-        # Obter valores únicos de jL e agrupar por séries
-        jl_col = col_mapping['jL']
-        jg_col = col_mapping['jG']
-        alpha_col = col_mapping['α']
-        flow_pattern_col = col_mapping['Flow Pattern']
-        
-        # Agrupar séries por j_L medido (valores próximos → média com 2 d.p.; ver _cluster_measured_jl_legend_labels)
-        df_plot = df.copy().reset_index(drop=True)
-        # Garantir α numérico (NAS pode trazer como string; colunas duplicadas → 1ª coluna)
-        _assign_numeric_to_first_named_column(df_plot, alpha_col, _one_col_series(df_plot, alpha_col))
-        _cluster_measured_jl_legend_labels(df_plot, jl_col)
-        jl_series = sorted(df_plot['_jl_legend_group_mean'].dropna().unique())
-        jl_series = [jl for jl in jl_series if pd.notna(jl)]
-        
-        print(f"Séries de jL encontradas (médias por grupo de valores medidos próximos): {jl_series}")
-
-        line_styles, _ = get_series_line_and_marker_styles()
-        flow_pattern_symbols = get_flow_pattern_symbols()
-        alpha_unc_col = _find_point_uncertainty_column(df_plot, col_mapping, 'U_alpha')
-        lowest_jl_uncertainty_indices = _indices_for_lowest_jl_series(
-            df_plot,
-            jl_col,
-            _one_col_series(df_plot, jg_col),
-            _one_col_series(df_plot, alpha_col),
-        )
-
-        for i, jl_lbl in enumerate(jl_series):
-            mask = df_plot['_jl_legend_group_mean'] == jl_lbl
-            jl_disp = float(jl_lbl)
-
-            jg_data = _one_col_series_masked(df_plot, mask, jg_col)
-            alpha_data = _one_col_series_masked(df_plot, mask, alpha_col)
-            flow_pattern_data = _one_col_series_masked(df_plot, mask, flow_pattern_col)
-            
-            # Remover valores nulos
-            valid_mask = pd.notna(jg_data) & pd.notna(alpha_data)
-            jg_clean = jg_data[valid_mask]
-            alpha_clean = alpha_data[valid_mask]
-            flow_pattern_clean = flow_pattern_data[valid_mask]
-            if len(jg_clean) > 0:
-                line_style = line_styles[i % len(line_styles)]
-                sorted_data = sorted(zip(jg_clean, alpha_clean, flow_pattern_clean))
-                jg_sorted = [x[0] for x in sorted_data]
-                alpha_sorted = [x[1] for x in sorted_data]
-                flow_pattern_sorted = [x[2] for x in sorted_data]
-
-                ax.plot(
-                    jg_sorted,
-                    alpha_sorted,
-                    line_style,
-                    color='black',
-                    linewidth=1.5,
-                    zorder=1,
-                )
-
-                for j, (jg_val, alpha_val, flow_pattern) in enumerate(zip(jg_sorted, alpha_sorted, flow_pattern_sorted)):
-                    pattern_data = style_for_flow_pattern_cell(
-                        flow_pattern, flow_pattern_symbols
-                    )
-                    symbol = pattern_data['symbol']
-                    color = pattern_data['color']
-                    ax.scatter(jg_val, alpha_val, c=color, marker=symbol, s=100,
-                             edgecolors=color, linewidth=1, zorder=2)
-                    
-                
-                
-                print(f"Plotando série jL = {jl_disp:.2f} m/s com {len(jg_clean)} pontos")
-
-        n_unc = _plot_selected_y_uncertainty(
-            ax,
-            df_plot,
-            lowest_jl_uncertainty_indices,
-            jg_col,
-            alpha_col,
-            alpha_unc_col,
-        )
-        if n_unc:
-            print(f"Incerteza de alpha incluida nos {n_unc} pontos de menor jL.")
-
-        legend_elements = flow_pattern_legend_handles(
-            df_plot, flow_pattern_col, flow_pattern_symbols
-        )
-
-        x_label = r'$J_{g} [m/s]$'
-        y_label = r'$\alpha$ [-]'
-        # Configurar eixos com fonte acadêmica
-        ax.set_xlabel(x_label, fontsize=26, fontfamily='serif')
-        ax.set_ylabel(y_label, fontsize=26, fontfamily='serif')
-        # Remover título conforme solicitado
-        
-        ax.set_axisbelow(True)
-        
-        # Configurar ticks menores para grade mais detalhada
-        ax.minorticks_on()
-
-        jg_vals = pd.to_numeric(_one_col_series(df_plot, jg_col), errors='coerce').to_numpy()
-        configure_linear_jg_axis_tick_locators(ax, jg_vals)
-
-        configure_alpha_y_axis_ticks(ax)
-
-        ax.set_ylim(bottom=0, top=1)
-        
-        # Configurar tamanho dos ticks com fonte acadêmica
-        ax.tick_params(axis='both', which='major', labelsize=20)
-        _set_ticklabels_font_serif(ax)
-        apply_subtle_gray_grid(ax)
-        _apply_linear_axes_one_decimal_format(ax)
-        finalize_jg_plot_xlim(ax)
-
-        jl_legend_elements = []
-        for i, jl_lbl in enumerate(jl_series):
-            jl_disp = float(jl_lbl)
-            line_style = line_styles[i % len(line_styles)]
-            jl_legend_elements.append(
-                plt.Line2D(
-                    [0],
-                    [0],
-                    color='black',
-                    linestyle=line_style,
-                    linewidth=1.5,
-                    label=rf'$J_{{l}}$ = {jl_disp:.2f} m/s',
-                )
-            )
-        apply_two_row_top_legend(ax, jl_legend_elements, legend_elements)
-        add_theta_and_mean_uncertainty_text(
-            ax,
-            df_plot,
-            theta,
+    available_cols = list(df.columns)
+    col_mapping = build_column_mapping(df)
+    if not ensure_alpha_in_column_mapping(col_mapping, available_cols):
+        _print_missing_plot_columns(
+            'Colunas ausentes para plot jG vs α: α (ou Alpha / Void fraction)',
             col_mapping,
-            uncertainty_key='U_alpha',
-            placement='bottom',
-            fontsize=17,
-            kind='alpha',
         )
+        return
+    miss = missing_column_keys(col_mapping, ['jG', 'jL', 'Flow Pattern'])
+    if miss:
+        _print_missing_plot_columns(
+            f'Colunas ausentes para plot jG vs α: {miss}',
+            col_mapping,
+        )
+        return
 
-        plt.tight_layout()
-        save_figure_to_sheet_dir(f'{sheet_name}_alpha_vs_jg', sheet_name)
+    setup_plot_style()
+    fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
 
-    except Exception as e:
-        print(f"Erro ao gerar plot: {e}")
-        import traceback
-        traceback.print_exc()
+    jl_col = col_mapping['jL']
+    jg_col = col_mapping['jG']
+    alpha_col = col_mapping['α']
+    flow_pattern_col = col_mapping['Flow Pattern']
+
+    df_plot = df.copy().reset_index(drop=True)
+    _assign_numeric_to_first_named_column(df_plot, alpha_col, _one_col_series(df_plot, alpha_col))
+    _cluster_measured_jl_legend_labels(df_plot, jl_col)
+    jl_series = _jl_legend_series_means(df_plot)
+
+    print(f"Séries de jL encontradas (médias por grupo de valores medidos próximos): {jl_series}")
+
+    line_styles, _ = get_series_line_and_marker_styles()
+    flow_pattern_symbols = get_flow_pattern_symbols()
+    alpha_unc_col = _find_point_uncertainty_column(df_plot, col_mapping, 'U_alpha')
+    lowest_jl_uncertainty_indices = _indices_for_lowest_jl_series(
+        df_plot,
+        jl_col,
+        _one_col_series(df_plot, jg_col),
+        _one_col_series(df_plot, alpha_col),
+    )
+
+    for i, jl_lbl in enumerate(jl_series):
+        mask = df_plot['_jl_legend_group_mean'] == jl_lbl
+        jl_disp = float(jl_lbl)
+        jg_data = _one_col_series_masked(df_plot, mask, jg_col)
+        alpha_data = _one_col_series_masked(df_plot, mask, alpha_col)
+        flow_pattern_data = _one_col_series_masked(df_plot, mask, flow_pattern_col)
+        valid_mask = pd.notna(jg_data) & pd.notna(alpha_data)
+        n = _plot_sorted_series_with_flow_patterns(
+            ax,
+            jg_data[valid_mask],
+            alpha_data[valid_mask],
+            flow_pattern_data[valid_mask],
+            line_styles[i % len(line_styles)],
+            flow_pattern_symbols,
+        )
+        if n:
+            print(f"Plotando série jL = {jl_disp:.2f} m/s com {n} pontos")
+
+    n_unc = _plot_selected_y_uncertainty(
+        ax, df_plot, lowest_jl_uncertainty_indices, jg_col, alpha_col, alpha_unc_col,
+    )
+    if n_unc:
+        print(f"Incerteza de alpha incluida nos {n_unc} pontos de menor jL.")
+
+    legend_elements = flow_pattern_legend_handles(df_plot, flow_pattern_col, flow_pattern_symbols)
+    ax.set_xlabel(r'$J_{g} [m/s]$', fontsize=26, fontfamily='serif')
+    ax.set_ylabel(r'$\alpha$ [-]', fontsize=26, fontfamily='serif')
+    ax.set_axisbelow(True)
+    ax.minorticks_on()
+    jg_vals = pd.to_numeric(_one_col_series(df_plot, jg_col), errors='coerce').to_numpy()
+    configure_linear_jg_axis_tick_locators(ax, jg_vals)
+    configure_alpha_y_axis_ticks(ax)
+    ax.set_ylim(bottom=0, top=1)
+    ax.tick_params(axis='both', which='major', labelsize=20)
+    _set_ticklabels_font_serif(ax)
+    apply_subtle_gray_grid(ax)
+    _apply_linear_axes_one_decimal_format(ax)
+    finalize_jg_plot_xlim(ax)
+    apply_two_row_top_legend(ax, _jl_series_legend_handles(jl_series, line_styles), legend_elements)
+    add_theta_and_mean_uncertainty_text(
+        ax, df_plot, theta, col_mapping,
+        uncertainty_key='U_alpha', placement='bottom', fontsize=17, kind='alpha',
+    )
+    plt.tight_layout()
+    save_figure_to_sheet_dir(f'{sheet_name}_alpha_vs_jg', sheet_name)
 
 
 def generate_alpha_vs_beta_homogeneous_parity_plot(df, sheet_name, fluid_1, fluid_2, theta):
@@ -2277,13 +2089,17 @@ def generate_alpha_vs_beta_homogeneous_parity_plot(df, sheet_name, fluid_1, flui
         available_cols = list(df.columns)
         col_mapping = build_column_mapping(df)
         if not ensure_alpha_in_column_mapping(col_mapping, available_cols):
-            print('Paridade α vs β: coluna α (void fraction) ausente.')
-            print(f'Colunas disponíveis: {list(col_mapping.keys())}')
+            _print_missing_plot_columns(
+                'Paridade α vs β: coluna α (void fraction) ausente.',
+                col_mapping,
+            )
             return
         miss = missing_column_keys(col_mapping, ['jG', 'jL', 'Flow Pattern'])
         if miss:
-            print(f'Paridade α vs β: colunas ausentes {miss}')
-            print(f'Colunas disponíveis: {list(col_mapping.keys())}')
+            _print_missing_plot_columns(
+                f'Paridade α vs β: colunas ausentes {miss}',
+                col_mapping,
+            )
             return
 
         setup_plot_style()
@@ -2620,8 +2436,10 @@ def generate_jl_vs_jg_flow_pattern_matrix_plot(df, sheet_name, fluid_1, fluid_2,
         col_mapping = build_column_mapping(df)
         miss = missing_column_keys(col_mapping, ['jG', 'jL', 'Flow Pattern'])
         if miss:
-            print(f'Colunas ausentes para matriz j_L vs j_G: {miss}')
-            print(f'Colunas disponíveis: {list(col_mapping.keys())}')
+            _print_missing_plot_columns(
+                f'Colunas ausentes para matriz j_L vs j_G: {miss}',
+                col_mapping,
+            )
             return
 
         setup_plot_style()
@@ -2929,802 +2747,463 @@ def generate_jl_vs_jg_flow_pattern_matrix_mosaic_plot(all_dataframes, selected_s
         traceback.print_exc()
 
 
+
+@report_plot_errors('Erro ao gerar plot')
 def generate_dpdzf_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
     """
-    Gera um plot científico de jG vs α, onde cada jL é uma série diferente.
+    Gera um plot científico de jG vs (∂P/∂z)_f, onde cada jL é uma série diferente.
     Inclui símbolos diferentes para cada Flow Pattern.
-    
-    Args:
-        df (pd.DataFrame): DataFrame com os dados
-        sheet_name (str): Nome da aba/sheet
     """
-    try:
-        col_mapping = build_column_mapping(df)
-        miss = missing_column_keys(col_mapping, ['jG', 'jL', 'dp/dz_F', 'Flow Pattern'])
-        if miss:
-            print(f'Colunas ausentes para plot: {miss}')
-            print(f'Colunas disponíveis: {list(col_mapping.keys())}')
-            return
+    col_mapping = build_column_mapping(df)
+    miss = missing_column_keys(col_mapping, ['jG', 'jL', 'dp/dz_F', 'Flow Pattern'])
+    if miss:
+        _print_missing_plot_columns(f'Colunas ausentes para plot: {miss}', col_mapping)
+        return
 
-        setup_plot_style()
-        fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
+    setup_plot_style()
+    fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
 
-        jl_col = col_mapping['jL']
-        jg_col = col_mapping['jG']
-        dp_dz_f_col = col_mapping['dp/dz_F']
-        flow_pattern_col = col_mapping['Flow Pattern']
-        
-        # Agrupar séries por j_L medido na planilha (valores próximos → média, 2 d.p.)
-        df_plot = df.copy().reset_index(drop=True)
-        _cluster_measured_jl_legend_labels(df_plot, jl_col)
-        jl_series = sorted(df_plot['_jl_legend_group_mean'].dropna().unique())
-        jl_series = [jl for jl in jl_series if pd.notna(jl)]
-        
-        print(f"Séries de jL encontradas (médias por grupo de valores medidos próximos): {jl_series}")
+    jl_col = col_mapping['jL']
+    jg_col = col_mapping['jG']
+    dp_dz_f_col = col_mapping['dp/dz_F']
+    flow_pattern_col = col_mapping['Flow Pattern']
 
-        line_styles, _ = get_series_line_and_marker_styles()
-        flow_pattern_symbols = get_flow_pattern_symbols()
-        dp_dz_f_unc_col = _find_point_uncertainty_column(df_plot, col_mapping, 'U_dpdz_F')
-        lowest_jl_uncertainty_indices = _indices_for_lowest_jl_series(
-            df_plot,
-            jl_col,
-            _one_col_series(df_plot, jg_col),
-            _one_col_series(df_plot, dp_dz_f_col),
-        )
+    df_plot = df.copy().reset_index(drop=True)
+    _cluster_measured_jl_legend_labels(df_plot, jl_col)
+    jl_series = _jl_legend_series_means(df_plot)
 
-        for i, jl_lbl in enumerate(jl_series):
-            mask = df_plot['_jl_legend_group_mean'] == jl_lbl
-            jl_disp = float(jl_lbl)
+    print(f"Séries de jL encontradas (médias por grupo de valores medidos próximos): {jl_series}")
 
-            jg_data = _one_col_series_masked(df_plot, mask, jg_col)
-            frictional_data = _one_col_series_masked(df_plot, mask, dp_dz_f_col)
-            flow_pattern_data = _one_col_series_masked(df_plot, mask, flow_pattern_col)
-            
-            # Remover valores nulos
-            valid_mask = pd.notna(jg_data) & pd.notna(frictional_data)
-            jg_clean = jg_data[valid_mask]
-            frictional_clean = frictional_data[valid_mask]/1000     #To plot in kPa
-            flow_pattern_clean = flow_pattern_data[valid_mask]
-            if len(jg_clean) > 0:
-                line_style = line_styles[i % len(line_styles)]
-                sorted_data = sorted(zip(jg_clean, frictional_clean, flow_pattern_clean))
-                jg_sorted = [x[0] for x in sorted_data]
-                frictional_sorted = [x[1] for x in sorted_data]
-                flow_pattern_sorted = [x[2] for x in sorted_data]
+    line_styles, _ = get_series_line_and_marker_styles()
+    flow_pattern_symbols = get_flow_pattern_symbols()
+    dp_dz_f_unc_col = _find_point_uncertainty_column(df_plot, col_mapping, 'U_dpdz_F')
+    lowest_jl_uncertainty_indices = _indices_for_lowest_jl_series(
+        df_plot, jl_col,
+        _one_col_series(df_plot, jg_col),
+        _one_col_series(df_plot, dp_dz_f_col),
+    )
 
-                ax.plot(
-                    jg_sorted,
-                    frictional_sorted,
-                    line_style,
-                    color='black',
-                    linewidth=1.5,
-                    zorder=1,
-                )
-
-                for j, (jg_val, frictional_val, flow_pattern) in enumerate(
-                    zip(jg_sorted, frictional_sorted, flow_pattern_sorted)
-                ):
-                    pattern_data = style_for_flow_pattern_cell(
-                        flow_pattern, flow_pattern_symbols
-                    )
-                    symbol = pattern_data['symbol']
-                    color = pattern_data['color']
-                    ax.scatter(
-                        jg_val,
-                        frictional_val,
-                        c=color,
-                        marker=symbol,
-                        s=100,
-                        edgecolors=color,
-                        linewidth=1,
-                        zorder=2,
-                    )
-
-                print(f"Plotando série jL = {jl_disp:.2f} m/s com {len(jg_clean)} pontos")
-
-        n_unc = _plot_selected_y_uncertainty(
+    for i, jl_lbl in enumerate(jl_series):
+        mask = df_plot['_jl_legend_group_mean'] == jl_lbl
+        jl_disp = float(jl_lbl)
+        jg_data = _one_col_series_masked(df_plot, mask, jg_col)
+        frictional_data = _one_col_series_masked(df_plot, mask, dp_dz_f_col)
+        flow_pattern_data = _one_col_series_masked(df_plot, mask, flow_pattern_col)
+        valid_mask = pd.notna(jg_data) & pd.notna(frictional_data)
+        n = _plot_sorted_series_with_flow_patterns(
             ax,
-            df_plot,
-            lowest_jl_uncertainty_indices,
-            jg_col,
-            dp_dz_f_col,
-            dp_dz_f_unc_col,
-            y_scale=1 / 1000,
+            jg_data[valid_mask],
+            frictional_data[valid_mask] / PA_TO_KPA,
+            flow_pattern_data[valid_mask],
+            line_styles[i % len(line_styles)],
+            flow_pattern_symbols,
         )
-        if n_unc:
-            print(f"Incerteza de gradiente friccional incluida nos {n_unc} pontos de menor jL.")
+        if n:
+            print(f"Plotando série jL = {jl_disp:.2f} m/s com {n} pontos")
 
-        legend_elements = flow_pattern_legend_handles(
-            df_plot, flow_pattern_col, flow_pattern_symbols
-        )
+    n_unc = _plot_selected_y_uncertainty(
+        ax, df_plot, lowest_jl_uncertainty_indices, jg_col, dp_dz_f_col, dp_dz_f_unc_col,
+        y_scale=1 / PA_TO_KPA,
+    )
+    if n_unc:
+        print(f"Incerteza de gradiente friccional incluida nos {n_unc} pontos de menor jL.")
 
-        x_label = r'$J_{g} [m/s]$'
-        # Configurar eixos com fonte acadêmica
-        ax.set_xlabel(x_label, fontsize=26, fontfamily='serif')
-        ax.set_ylabel(YLABEL_DP_DZ_F, fontsize=26, fontfamily='serif')
-        # Remover título conforme solicitado
-        
-        ax.set_axisbelow(True)
-        
-        # Configurar ticks menores para grade mais detalhada
-        ax.minorticks_on()
-
-        jg_vals = pd.to_numeric(_one_col_series(df_plot, jg_col), errors='coerce').to_numpy()
-        configure_linear_jg_axis_tick_locators(ax, jg_vals)
-
-        y_lo, y_hi = dpdz_y_limits_for_plot('f')
-        if y_lo is not None or y_hi is not None:
-            apply_fixed_dpdz_y_axis(ax, 'f')
-        else:
-            ax.set_ylim(bottom=0)
-            configure_dpdz_y_axis_minor_ticks(ax)
-        ax.tick_params(axis='both', which='major', labelsize=20)
-        _set_ticklabels_font_serif(ax)
-        apply_subtle_gray_grid(ax)
-        _apply_linear_axes_one_decimal_format(ax)
-        finalize_jg_plot_xlim(ax)
-
-        jl_legend_elements = []
-        for i, jl_lbl in enumerate(jl_series):
-            jl_disp = float(jl_lbl)
-            line_style = line_styles[i % len(line_styles)]
-            jl_legend_elements.append(
-                plt.Line2D(
-                    [0],
-                    [0],
-                    color='black',
-                    linestyle=line_style,
-                    linewidth=1.5,
-                    label=rf'$J_{{l}}$ = {jl_disp:.2f} m/s',
-                )
-            )
-
-        apply_two_row_top_legend(ax, jl_legend_elements, legend_elements)
-        add_theta_and_mean_uncertainty_text(
-            ax,
-            df_plot,
-            theta,
-            col_mapping,
-            uncertainty_key='U_dpdz_F',
-            unit_latex=r'\mathrm{kPa/m}',
-            placement='top',
-            fontsize=17,
-            kind='kpa_per_m',
-        )
-
-        plt.tight_layout()
-        save_figure_to_sheet_dir(f'{sheet_name}_frictional_vs_jg', sheet_name)
-
-    except Exception as e:
-        print(f"Erro ao gerar plot: {e}")
-        import traceback
-        traceback.print_exc()
+    legend_elements = flow_pattern_legend_handles(df_plot, flow_pattern_col, flow_pattern_symbols)
+    ax.set_xlabel(r'$J_{g} [m/s]$', fontsize=26, fontfamily='serif')
+    ax.set_ylabel(YLABEL_DP_DZ_F, fontsize=26, fontfamily='serif')
+    ax.set_axisbelow(True)
+    ax.minorticks_on()
+    jg_vals = pd.to_numeric(_one_col_series(df_plot, jg_col), errors='coerce').to_numpy()
+    configure_linear_jg_axis_tick_locators(ax, jg_vals)
+    y_lo, y_hi = dpdz_y_limits_for_plot('f')
+    if y_lo is not None or y_hi is not None:
+        apply_fixed_dpdz_y_axis(ax, 'f')
+    else:
+        ax.set_ylim(bottom=0)
+        configure_dpdz_y_axis_minor_ticks(ax)
+    ax.tick_params(axis='both', which='major', labelsize=20)
+    _set_ticklabels_font_serif(ax)
+    apply_subtle_gray_grid(ax)
+    _apply_linear_axes_one_decimal_format(ax)
+    finalize_jg_plot_xlim(ax)
+    apply_two_row_top_legend(ax, _jl_series_legend_handles(jl_series, line_styles), legend_elements)
+    add_theta_and_mean_uncertainty_text(
+        ax, df_plot, theta, col_mapping,
+        uncertainty_key='U_dpdz_F', unit_latex=r'\mathrm{kPa/m}',
+        placement='top', fontsize=17, kind='kpa_per_m',
+    )
+    plt.tight_layout()
+    save_figure_to_sheet_dir(f'{sheet_name}_frictional_vs_jg', sheet_name)
 
 
+
+@report_plot_errors('Erro ao gerar plot total vs jG')
 def generate_dpdzt_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta):
     """
     Gera um plot científico de jG vs (∂P/∂z)_t, com a mesma estrutura de frictional_vs_jg:
     uma série por jL (média por grupo arredondada a 2 casas decimais), símbolos por Flow Pattern.
     O eixo Y não é forçado a y ≥ 0 (gradiente total pode ser negativo).
     """
-    try:
-        col_mapping = build_column_mapping(df)
-        miss = missing_column_keys(col_mapping, ['jG', 'jL', 'dp/dz_T', 'Flow Pattern'])
-        if miss:
-            print(f'Colunas ausentes para plot total vs jG: {miss}')
-            print(f'Colunas disponíveis: {list(col_mapping.keys())}')
-            return
-
-        setup_plot_style()
-        fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
-
-        jl_col = col_mapping['jL']
-        jg_col = col_mapping['jG']
-        dp_dz_t_col = col_mapping['dp/dz_T']
-        flow_pattern_col = col_mapping['Flow Pattern']
-
-        df_plot = df.copy().reset_index(drop=True)
-        _cluster_measured_jl_legend_labels(df_plot, jl_col)
-
-        jl_series = sorted(df_plot['_jl_legend_group_mean'].dropna().unique())
-        jl_series = [jl for jl in jl_series if pd.notna(jl)]
-
-        print(f"[total_vs_jg] Séries de jL (médias por grupo de valores medidos próximos): {jl_series}")
-
-        line_styles, _ = get_series_line_and_marker_styles()
-        flow_pattern_symbols = get_flow_pattern_symbols()
-        dp_dz_t_unc_col = _find_point_uncertainty_column(df_plot, col_mapping, 'U_dpdz_T')
-        lowest_jl_uncertainty_indices = _indices_for_lowest_jl_series(
-            df_plot,
-            jl_col,
-            _one_col_series(df_plot, jg_col),
-            _one_col_series(df_plot, dp_dz_t_col),
-        )
-
-        for i, jl_lbl in enumerate(jl_series):
-            mask = df_plot['_jl_legend_group_mean'] == jl_lbl
-            jl_disp = float(jl_lbl)
-
-            jg_data = _one_col_series_masked(df_plot, mask, jg_col)
-            total_data = _one_col_series_masked(df_plot, mask, dp_dz_t_col)
-            flow_pattern_data = _one_col_series_masked(df_plot, mask, flow_pattern_col)
-
-            valid_mask = pd.notna(jg_data) & pd.notna(total_data)
-            jg_clean = jg_data[valid_mask]
-            total_clean = total_data[valid_mask] / 1000
-            flow_pattern_clean = flow_pattern_data[valid_mask]
-            if len(jg_clean) > 0:
-                line_style = line_styles[i % len(line_styles)]
-                sorted_data = sorted(zip(jg_clean, total_clean, flow_pattern_clean))
-                jg_sorted = [x[0] for x in sorted_data]
-                total_sorted = [x[1] for x in sorted_data]
-                flow_pattern_sorted = [x[2] for x in sorted_data]
-
-                ax.plot(
-                    jg_sorted,
-                    total_sorted,
-                    line_style,
-                    color='black',
-                    linewidth=1.5,
-                    zorder=1,
-                )
-
-                for jg_val, total_val, flow_pattern in zip(
-                    jg_sorted, total_sorted, flow_pattern_sorted
-                ):
-                    pattern_data = style_for_flow_pattern_cell(
-                        flow_pattern, flow_pattern_symbols
-                    )
-                    symbol = pattern_data['symbol']
-                    color = pattern_data['color']
-                    ax.scatter(
-                        jg_val,
-                        total_val,
-                        c=color,
-                        marker=symbol,
-                        s=100,
-                        edgecolors=color,
-                        linewidth=1,
-                        zorder=2,
-                    )
-
-                print(f"[total_vs_jg] Plotando série jL = {jl_disp:.2f} m/s com {len(jg_clean)} pontos")
-
-        n_unc = _plot_selected_y_uncertainty(
-            ax,
-            df_plot,
-            lowest_jl_uncertainty_indices,
-            jg_col,
-            dp_dz_t_col,
-            dp_dz_t_unc_col,
-            y_scale=1 / 1000,
-        )
-        if n_unc:
-            print(f"Incerteza de gradiente total incluida nos {n_unc} pontos de menor jL.")
-
-        legend_elements = flow_pattern_legend_handles(
-            df_plot, flow_pattern_col, flow_pattern_symbols
-        )
-
-        x_label = r'$J_{g} [m/s]$'
-        ax.set_xlabel(x_label, fontsize=26, fontfamily='serif')
-        ax.set_ylabel(YLABEL_DP_DZ_T, fontsize=26, fontfamily='serif')
-
-        ax.set_axisbelow(True)
-        ax.minorticks_on()
-
-        jg_vals = pd.to_numeric(_one_col_series(df_plot, jg_col), errors='coerce').to_numpy()
-        configure_linear_jg_axis_tick_locators(ax, jg_vals)
-        y_lo, y_hi = dpdz_y_limits_for_plot('t')
-        if y_lo is not None or y_hi is not None:
-            apply_fixed_dpdz_y_axis(ax, 't')
-
-        ax.tick_params(axis='both', which='major', labelsize=20)
-        _set_ticklabels_font_serif(ax)
-        apply_subtle_gray_grid(ax)
-        _apply_linear_axes_one_decimal_format(ax)
-        finalize_jg_plot_xlim(ax)
-
-        jl_legend_elements = []
-        for i, jl_lbl in enumerate(jl_series):
-            jl_disp = float(jl_lbl)
-            line_style = line_styles[i % len(line_styles)]
-            jl_legend_elements.append(
-                plt.Line2D(
-                    [0],
-                    [0],
-                    color='black',
-                    linestyle=line_style,
-                    linewidth=1.5,
-                    label=rf'$J_{{l}}$ = {jl_disp:.2f} m/s',
-                )
-            )
-
-        apply_two_row_top_legend(ax, jl_legend_elements, legend_elements)
-        add_theta_and_mean_uncertainty_text(
-            ax,
-            df_plot,
-            theta,
+    col_mapping = build_column_mapping(df)
+    miss = missing_column_keys(col_mapping, ['jG', 'jL', 'dp/dz_T', 'Flow Pattern'])
+    if miss:
+        _print_missing_plot_columns(
+            f'Colunas ausentes para plot total vs jG: {miss}',
             col_mapping,
-            uncertainty_key='U_dpdz_T',
-            unit_latex=r'\mathrm{kPa/m}',
-            placement='bottom_right',
-            fontsize=17,
-            kind='kpa_per_m',
         )
+        return
 
-        plt.tight_layout()
-        save_figure_to_sheet_dir(f'{sheet_name}_total_vs_jg', sheet_name)
+    setup_plot_style()
+    fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
 
-    except Exception as e:
-        print(f"Erro ao gerar plot total vs jG: {e}")
-        import traceback
-        traceback.print_exc()
+    jl_col = col_mapping['jL']
+    jg_col = col_mapping['jG']
+    dp_dz_t_col = col_mapping['dp/dz_T']
+    flow_pattern_col = col_mapping['Flow Pattern']
+
+    df_plot = df.copy().reset_index(drop=True)
+    _cluster_measured_jl_legend_labels(df_plot, jl_col)
+    jl_series = _jl_legend_series_means(df_plot)
+
+    print(f"[total_vs_jg] Séries de jL (médias por grupo de valores medidos próximos): {jl_series}")
+
+    line_styles, _ = get_series_line_and_marker_styles()
+    flow_pattern_symbols = get_flow_pattern_symbols()
+    dp_dz_t_unc_col = _find_point_uncertainty_column(df_plot, col_mapping, 'U_dpdz_T')
+    lowest_jl_uncertainty_indices = _indices_for_lowest_jl_series(
+        df_plot, jl_col,
+        _one_col_series(df_plot, jg_col),
+        _one_col_series(df_plot, dp_dz_t_col),
+    )
+
+    for i, jl_lbl in enumerate(jl_series):
+        mask = df_plot['_jl_legend_group_mean'] == jl_lbl
+        jl_disp = float(jl_lbl)
+        jg_data = _one_col_series_masked(df_plot, mask, jg_col)
+        total_data = _one_col_series_masked(df_plot, mask, dp_dz_t_col)
+        flow_pattern_data = _one_col_series_masked(df_plot, mask, flow_pattern_col)
+        valid_mask = pd.notna(jg_data) & pd.notna(total_data)
+        n = _plot_sorted_series_with_flow_patterns(
+            ax,
+            jg_data[valid_mask],
+            total_data[valid_mask] / PA_TO_KPA,
+            flow_pattern_data[valid_mask],
+            line_styles[i % len(line_styles)],
+            flow_pattern_symbols,
+        )
+        if n:
+            print(f"[total_vs_jg] Plotando série jL = {jl_disp:.2f} m/s com {n} pontos")
+
+    n_unc = _plot_selected_y_uncertainty(
+        ax, df_plot, lowest_jl_uncertainty_indices, jg_col, dp_dz_t_col, dp_dz_t_unc_col,
+        y_scale=1 / PA_TO_KPA,
+    )
+    if n_unc:
+        print(f"Incerteza de gradiente total incluida nos {n_unc} pontos de menor jL.")
+
+    legend_elements = flow_pattern_legend_handles(df_plot, flow_pattern_col, flow_pattern_symbols)
+    ax.set_xlabel(r'$J_{g} [m/s]$', fontsize=26, fontfamily='serif')
+    ax.set_ylabel(YLABEL_DP_DZ_T, fontsize=26, fontfamily='serif')
+    ax.set_axisbelow(True)
+    ax.minorticks_on()
+    jg_vals = pd.to_numeric(_one_col_series(df_plot, jg_col), errors='coerce').to_numpy()
+    configure_linear_jg_axis_tick_locators(ax, jg_vals)
+    y_lo, y_hi = dpdz_y_limits_for_plot('t')
+    if y_lo is not None or y_hi is not None:
+        apply_fixed_dpdz_y_axis(ax, 't')
+    ax.tick_params(axis='both', which='major', labelsize=20)
+    _set_ticklabels_font_serif(ax)
+    apply_subtle_gray_grid(ax)
+    _apply_linear_axes_one_decimal_format(ax)
+    finalize_jg_plot_xlim(ax)
+    apply_two_row_top_legend(ax, _jl_series_legend_handles(jl_series, line_styles), legend_elements)
+    add_theta_and_mean_uncertainty_text(
+        ax, df_plot, theta, col_mapping,
+        uncertainty_key='U_dpdz_T', unit_latex=r'\mathrm{kPa/m}',
+        placement='bottom_right', fontsize=17, kind='kpa_per_m',
+    )
+    plt.tight_layout()
+    save_figure_to_sheet_dir(f'{sheet_name}_total_vs_jg', sheet_name)
 
 
+
+@report_plot_errors('Erro ao gerar plot α vs Re_sg')
 def generate_alpha_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
     """
     Gera um plot de Re_sg vs α (void fraction), com a mesma abordagem dos plots *_vs_Re_g:
     uma série por Re_sl (agrupado), símbolos por Flow Pattern, eixo X em escala log.
     """
-    try:
-        available_cols = list(df.columns)
-        col_mapping = build_column_mapping(df)
-        if not ensure_alpha_in_column_mapping(col_mapping, available_cols):
-            print('Colunas ausentes para plot Re_sg vs α: α (ou Alpha / Void fraction)')
-            print(f'Colunas disponíveis: {list(col_mapping.keys())}')
-            return
-        miss = missing_column_keys(
+    available_cols = list(df.columns)
+    col_mapping = build_column_mapping(df)
+    if not ensure_alpha_in_column_mapping(col_mapping, available_cols):
+        _print_missing_plot_columns(
+            'Colunas ausentes para plot Re_sg vs α: α (ou Alpha / Void fraction)',
             col_mapping,
-            ['jG', 'jL', 'Flow Pattern', 'Temp.', 'Gauge Pressure'],
         )
-        if miss:
-            print(f'Colunas ausentes para plot Re_sg vs α: {miss}')
-            print(f'Colunas disponíveis: {list(col_mapping.keys())}')
-            return
-
-        setup_plot_style()
-        fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
-
-        alpha_col = col_mapping['α']
-        flow_pattern_col = col_mapping['Flow Pattern']
-        compute_Re_sg_column(df, col_mapping, fluid_1)
-
-        df_plot = df.copy().reset_index(drop=True)
-        _assign_numeric_to_first_named_column(
-            df_plot, alpha_col, _one_col_series(df_plot, alpha_col)
-        )
-
-        if 'Re_sl_group' not in df.columns:
-            standardize_liquid_conditions({sheet_name: df})
-
-        df_plot['Re_sl_group'] = _one_col_series(df, 'Re_sl_group').values
-
-        Re_sl_series = sorted(df_plot['Re_sl_group'].dropna().unique())
-        Re_sl_series = [re_l for re_l in Re_sl_series if pd.notna(re_l)]
-
-        Re_sg_plot = _one_col_series(df_plot, 'Re_sg')
-
-        print(f"Séries de Re_sl (padronizado) para α vs Re_sg: {Re_sl_series}")
-
-        line_styles, _ = get_series_line_and_marker_styles()
-        flow_pattern_symbols = get_flow_pattern_symbols()
-        alpha_unc_col = _find_point_uncertainty_column(df_plot, col_mapping, 'U_alpha')
-        lowest_resl_uncertainty_indices = _indices_for_lowest_resl_series(
-            df_plot,
-            _one_col_series(df_plot, 'Re_sg'),
-            _one_col_series(df_plot, alpha_col),
-        )
-        # Só séries com pontos entram na legenda (estilo de linha por Re_sl)
-        legend_series_meta = []
-
-        for i, re_l in enumerate(Re_sl_series):
-            mask = _mask_re_sl_group(df_plot['Re_sl_group'], re_l)
-
-            alpha_data = _one_col_series_masked(df_plot, mask, alpha_col)
-            flow_pattern_data = _one_col_series_masked(df_plot, mask, flow_pattern_col)
-            Re_sg_masked = Re_sg_plot[mask]
-            valid_mask = pd.notna(Re_sg_masked) & pd.notna(alpha_data)
-            Re_sg_clean = Re_sg_masked[valid_mask]
-            alpha_clean = alpha_data[valid_mask]
-            flow_pattern_clean = flow_pattern_data[valid_mask]
-
-            if len(Re_sg_clean) > 0:
-                line_style = line_styles[i % len(line_styles)]
-                legend_series_meta.append((re_l, line_style))
-
-                sorted_data = sorted(zip(Re_sg_clean, alpha_clean, flow_pattern_clean))
-                Re_sg_sorted = [x[0] for x in sorted_data]
-                alpha_sorted = [x[1] for x in sorted_data]
-                flow_pattern_sorted = [x[2] for x in sorted_data]
-
-                ax.plot(
-                    Re_sg_sorted,
-                    alpha_sorted,
-                    line_style,
-                    color='black',
-                    linewidth=1.5,
-                    zorder=1,
-                )
-
-                for Re_sg_val, alpha_val, flow_pattern in zip(
-                    Re_sg_sorted, alpha_sorted, flow_pattern_sorted
-                ):
-                    pattern_data = style_for_flow_pattern_cell(
-                        flow_pattern, flow_pattern_symbols
-                    )
-                    symbol = pattern_data['symbol']
-                    p_color = pattern_data['color']
-                    ax.scatter(
-                        Re_sg_val,
-                        alpha_val,
-                        c=p_color,
-                        marker=symbol,
-                        s=100,
-                        edgecolors=p_color,
-                        linewidth=1,
-                        zorder=2,
-                    )
-
-                print(f"Plotando α vs Re_sg, série Re_sl = {re_l:.1f} com {len(Re_sg_clean)} pontos")
-
-        n_unc = _plot_selected_y_uncertainty(
-            ax,
-            df_plot,
-            lowest_resl_uncertainty_indices,
-            'Re_sg',
-            alpha_col,
-            alpha_unc_col,
-        )
-        if n_unc:
-            print(f"Incerteza de alpha incluida nos {n_unc} pontos de menor Re_sl.")
-
-        legend_elements = flow_pattern_legend_handles(
-            df_plot, flow_pattern_col, flow_pattern_symbols
-        )
-
-        ax.set_xlabel(r'$Re_{sg}$ [-]', fontsize=26, fontfamily='serif')
-        ax.set_ylabel(r'$\alpha$ [-]', fontsize=26, fontfamily='serif')
-        style_axes_re_g_log_x(ax, y_major_step=0.1, y_lim_bottom=0, y_lim_top=1.0)
-        configure_alpha_y_axis_ticks(ax)
-
-        Re_sl_legend_elements = re_sl_legend_handles_from_meta(legend_series_meta)
-
-        apply_two_row_top_legend(ax, Re_sl_legend_elements, legend_elements)
-        add_theta_and_mean_uncertainty_text(
-            ax,
-            df_plot,
-            theta,
+        return
+    miss = missing_column_keys(
+        col_mapping, ['jG', 'jL', 'Flow Pattern', 'Temp.', 'Gauge Pressure'],
+    )
+    if miss:
+        _print_missing_plot_columns(
+            f'Colunas ausentes para plot Re_sg vs α: {miss}',
             col_mapping,
-            uncertainty_key='U_alpha',
-            placement='bottom',
-            fontsize=17,
-            kind='alpha',
         )
+        return
 
-        plt.tight_layout()
-        save_figure_to_sheet_dir(f'{sheet_name}_alpha_vs_Re_g', sheet_name)
+    setup_plot_style()
+    fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
 
-    except Exception as e:
-        print(f"Erro ao gerar plot α vs Re_sg: {e}")
-        import traceback
-        traceback.print_exc()
+    alpha_col = col_mapping['α']
+    flow_pattern_col = col_mapping['Flow Pattern']
+    compute_Re_sg_column(df, col_mapping, fluid_1)
+
+    df_plot = df.copy().reset_index(drop=True)
+    _assign_numeric_to_first_named_column(df_plot, alpha_col, _one_col_series(df_plot, alpha_col))
+
+    if 'Re_sl_group' not in df.columns:
+        standardize_liquid_conditions({sheet_name: df})
+
+    df_plot['Re_sl_group'] = _one_col_series(df, 'Re_sl_group').values
+    Re_sl_series = _sorted_finite_unique(df_plot['Re_sl_group'])
+    Re_sg_plot = _one_col_series(df_plot, 'Re_sg')
+
+    print(f"Séries de Re_sl (padronizado) para α vs Re_sg: {Re_sl_series}")
+
+    line_styles, _ = get_series_line_and_marker_styles()
+    flow_pattern_symbols = get_flow_pattern_symbols()
+    alpha_unc_col = _find_point_uncertainty_column(df_plot, col_mapping, 'U_alpha')
+    lowest_resl_uncertainty_indices = _indices_for_lowest_resl_series(
+        df_plot, _one_col_series(df_plot, 'Re_sg'), _one_col_series(df_plot, alpha_col),
+    )
+    legend_series_meta = []
+
+    for i, re_l in enumerate(Re_sl_series):
+        mask = _mask_re_sl_group(df_plot['Re_sl_group'], re_l)
+        alpha_data = _one_col_series_masked(df_plot, mask, alpha_col)
+        flow_pattern_data = _one_col_series_masked(df_plot, mask, flow_pattern_col)
+        Re_sg_masked = Re_sg_plot[mask]
+        valid_mask = pd.notna(Re_sg_masked) & pd.notna(alpha_data)
+        line_style = line_styles[i % len(line_styles)]
+        n = _plot_sorted_series_with_flow_patterns(
+            ax,
+            Re_sg_masked[valid_mask],
+            alpha_data[valid_mask],
+            flow_pattern_data[valid_mask],
+            line_style,
+            flow_pattern_symbols,
+        )
+        if n:
+            legend_series_meta.append((re_l, line_style))
+            print(f"Plotando α vs Re_sg, série Re_sl = {re_l:.1f} com {n} pontos")
+
+    n_unc = _plot_selected_y_uncertainty(
+        ax, df_plot, lowest_resl_uncertainty_indices, 'Re_sg', alpha_col, alpha_unc_col,
+    )
+    if n_unc:
+        print(f"Incerteza de alpha incluida nos {n_unc} pontos de menor Re_sl.")
+
+    legend_elements = flow_pattern_legend_handles(df_plot, flow_pattern_col, flow_pattern_symbols)
+    ax.set_xlabel(r'$Re_{sg}$ [-]', fontsize=26, fontfamily='serif')
+    ax.set_ylabel(r'$\alpha$ [-]', fontsize=26, fontfamily='serif')
+    style_axes_re_g_log_x(ax, y_major_step=0.1, y_lim_bottom=0, y_lim_top=1.0)
+    configure_alpha_y_axis_ticks(ax)
+    apply_two_row_top_legend(ax, re_sl_legend_handles_from_meta(legend_series_meta), legend_elements)
+    add_theta_and_mean_uncertainty_text(
+        ax, df_plot, theta, col_mapping,
+        uncertainty_key='U_alpha', placement='bottom', fontsize=17, kind='alpha',
+    )
+    plt.tight_layout()
+    save_figure_to_sheet_dir(f'{sheet_name}_alpha_vs_Re_g', sheet_name)
 
 
+
+@report_plot_errors('Erro ao gerar plot')
 def generate_dpdzf_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
     """
     Gera um plot científico de Re_sg vs dp/dz_F, onde cada Re_sl é uma série diferente.
     Inclui símbolos diferentes para cada Flow Pattern.
     """
-    try:
-        col_mapping = build_column_mapping(df)
-        miss = missing_column_keys(
-            col_mapping,
-            ['jG', 'jL', 'dp/dz_F', 'Flow Pattern', 'Temp.', 'Gauge Pressure'],
-        )
-        if miss:
-            print(f'Colunas ausentes para plot: {miss}')
-            print(f'Colunas disponíveis: {list(col_mapping.keys())}')
-            return
+    col_mapping = build_column_mapping(df)
+    miss = missing_column_keys(
+        col_mapping, ['jG', 'jL', 'dp/dz_F', 'Flow Pattern', 'Temp.', 'Gauge Pressure'],
+    )
+    if miss:
+        _print_missing_plot_columns(f'Colunas ausentes para plot: {miss}', col_mapping)
+        return
 
-        setup_plot_style()
-        fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
+    setup_plot_style()
+    fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
 
-        jl_col = col_mapping['jL']
-        compute_Re_sg_column(df, col_mapping, fluid_1)
+    jl_col = col_mapping['jL']
+    compute_Re_sg_column(df, col_mapping, fluid_1)
+    dp_dz_f_col = col_mapping['dp/dz_F']
+    flow_pattern_col = col_mapping['Flow Pattern']
 
-        dp_dz_f_col = col_mapping['dp/dz_F']
-        flow_pattern_col = col_mapping['Flow Pattern']
-        
-        # Padronizar antes de copiar; legendas de j_L usam valores medidos (jL_raw) agrupados
-        if 'Re_sl_group' not in df.columns:
-            standardize_liquid_conditions({sheet_name: df})
+    if 'Re_sl_group' not in df.columns:
+        standardize_liquid_conditions({sheet_name: df})
 
-        df_plot = df.copy().reset_index(drop=True)
-        if 'Re_sl_group' in df.columns:
-            df_plot['Re_sl_group'] = _one_col_series(df, 'Re_sl_group').values
-        if 'jL_raw' in df.columns:
-            df_plot['jL_raw'] = _one_col_series(df, 'jL_raw').values
-        _cluster_measured_jl_legend_labels(df_plot, jl_col)
-        jl_series = sorted(df_plot['_jl_legend_group_mean'].dropna().unique())
-        jl_series = [jl for jl in jl_series if pd.notna(jl)]
+    df_plot = df.copy().reset_index(drop=True)
+    if 'Re_sl_group' in df.columns:
+        df_plot['Re_sl_group'] = _one_col_series(df, 'Re_sl_group').values
+    if 'jL_raw' in df.columns:
+        df_plot['jL_raw'] = _one_col_series(df, 'jL_raw').values
+    _cluster_measured_jl_legend_labels(df_plot, jl_col)
+    jl_series = _jl_legend_series_means(df_plot)
 
-        # Obter séries únicas de Re_sl (agrupado/padronizado)
-        Re_sl_series = sorted(df_plot['Re_sl_group'].dropna().unique())
-        Re_sl_series = [re_l for re_l in Re_sl_series if pd.notna(re_l)]
-        
-        Re_sg_plot = _one_col_series(df_plot, 'Re_sg')
-        
-        print(f"Séries de jL (médias por grupo de valores medidos próximos): {jl_series}")
-        print(f"Séries de Re_sl (padronizado) encontradas: {Re_sl_series}")
+    Re_sl_series = _sorted_finite_unique(df_plot['Re_sl_group'])
+    Re_sg_plot = _one_col_series(df_plot, 'Re_sg')
 
-        line_styles, _ = get_series_line_and_marker_styles()
-        flow_pattern_symbols = get_flow_pattern_symbols()
-        dp_dz_f_unc_col = _find_point_uncertainty_column(df_plot, col_mapping, 'U_dpdz_F')
-        lowest_resl_uncertainty_indices = _indices_for_lowest_resl_series(
-            df_plot,
-            _one_col_series(df_plot, 'Re_sg'),
-            _one_col_series(df_plot, dp_dz_f_col),
-        )
-        legend_series_meta = []
+    print(f"Séries de jL (médias por grupo de valores medidos próximos): {jl_series}")
+    print(f"Séries de Re_sl (padronizado) encontradas: {Re_sl_series}")
 
-        for i, re_l in enumerate(Re_sl_series):
-            mask = _mask_re_sl_group(df_plot['Re_sl_group'], re_l)
+    line_styles, _ = get_series_line_and_marker_styles()
+    flow_pattern_symbols = get_flow_pattern_symbols()
+    dp_dz_f_unc_col = _find_point_uncertainty_column(df_plot, col_mapping, 'U_dpdz_F')
+    lowest_resl_uncertainty_indices = _indices_for_lowest_resl_series(
+        df_plot, _one_col_series(df_plot, 'Re_sg'), _one_col_series(df_plot, dp_dz_f_col),
+    )
+    legend_series_meta = []
 
-            frictional_data = _one_col_series_masked(df_plot, mask, dp_dz_f_col)
-            flow_pattern_data = _one_col_series_masked(df_plot, mask, flow_pattern_col)
-            Re_sg_masked = Re_sg_plot[mask]
-            valid_mask = pd.notna(Re_sg_masked) & pd.notna(frictional_data)
-            Re_sg_clean = Re_sg_masked[valid_mask]
-            frictional_clean = frictional_data[valid_mask] / 1000
-            flow_pattern_clean = flow_pattern_data[valid_mask]
-
-            if len(Re_sg_clean) > 0:
-                line_style = line_styles[i % len(line_styles)]
-                legend_series_meta.append((re_l, line_style))
-
-                sorted_data = sorted(zip(Re_sg_clean, frictional_clean, flow_pattern_clean))
-                Re_sg_sorted = [x[0] for x in sorted_data]
-                frictional_sorted = [x[1] for x in sorted_data]
-                flow_pattern_sorted = [x[2] for x in sorted_data]
-
-                ax.plot(
-                    Re_sg_sorted,
-                    frictional_sorted,
-                    line_style,
-                    color='black',
-                    linewidth=1.5,
-                    zorder=1,
-                )
-
-                for Re_sg_val, frictional_val, flow_pattern in zip(
-                    Re_sg_sorted, frictional_sorted, flow_pattern_sorted
-                ):
-                    pattern_data = style_for_flow_pattern_cell(
-                        flow_pattern, flow_pattern_symbols
-                    )
-                    symbol = pattern_data['symbol']
-                    color = pattern_data['color']
-                    ax.scatter(
-                        Re_sg_val,
-                        frictional_val,
-                        c=color,
-                        marker=symbol,
-                        s=100,
-                        edgecolors=color,
-                        linewidth=1,
-                        zorder=2,
-                    )
-
-                print(f"Plotando série Re_sl = {re_l:.1f} com {len(Re_sg_clean)} pontos")
-
-        n_unc = _plot_selected_y_uncertainty(
+    for i, re_l in enumerate(Re_sl_series):
+        mask = _mask_re_sl_group(df_plot['Re_sl_group'], re_l)
+        frictional_data = _one_col_series_masked(df_plot, mask, dp_dz_f_col)
+        flow_pattern_data = _one_col_series_masked(df_plot, mask, flow_pattern_col)
+        Re_sg_masked = Re_sg_plot[mask]
+        valid_mask = pd.notna(Re_sg_masked) & pd.notna(frictional_data)
+        line_style = line_styles[i % len(line_styles)]
+        n = _plot_sorted_series_with_flow_patterns(
             ax,
-            df_plot,
-            lowest_resl_uncertainty_indices,
-            'Re_sg',
-            dp_dz_f_col,
-            dp_dz_f_unc_col,
-            y_scale=1 / 1000,
+            Re_sg_masked[valid_mask],
+            frictional_data[valid_mask] / PA_TO_KPA,
+            flow_pattern_data[valid_mask],
+            line_style,
+            flow_pattern_symbols,
         )
-        if n_unc:
-            print(f"Incerteza de gradiente friccional incluida nos {n_unc} pontos de menor Re_sl.")
+        if n:
+            legend_series_meta.append((re_l, line_style))
+            print(f"Plotando série Re_sl = {re_l:.1f} com {n} pontos")
 
-        legend_elements = flow_pattern_legend_handles(
-            df_plot, flow_pattern_col, flow_pattern_symbols
-        )
+    n_unc = _plot_selected_y_uncertainty(
+        ax, df_plot, lowest_resl_uncertainty_indices, 'Re_sg', dp_dz_f_col, dp_dz_f_unc_col,
+        y_scale=1 / PA_TO_KPA,
+    )
+    if n_unc:
+        print(f"Incerteza de gradiente friccional incluida nos {n_unc} pontos de menor Re_sl.")
 
-        ax.set_xlabel(r'$Re_{sg}$ [-]', fontsize=26, fontfamily='serif')
-        ax.set_ylabel(YLABEL_DP_DZ_F, fontsize=26, fontfamily='serif')
-        y_lo, y_hi = dpdz_y_limits_for_plot('f')
-        y_step = dpdz_y_major_step_for_plot('f')
-        if y_lo is not None or y_hi is not None:
-            style_axes_re_g_log_x(
-                ax, y_major_step=y_step, y_lim_bottom=y_lo, y_lim_top=y_hi
-            )
-            configure_dpdz_y_axis_minor_ticks(ax)
-        else:
-            style_axes_re_g_log_x(ax, y_major_step=0.5, y_lim_bottom=0, y_lim_top=None)
+    legend_elements = flow_pattern_legend_handles(df_plot, flow_pattern_col, flow_pattern_symbols)
+    ax.set_xlabel(r'$Re_{sg}$ [-]', fontsize=26, fontfamily='serif')
+    ax.set_ylabel(YLABEL_DP_DZ_F, fontsize=26, fontfamily='serif')
+    y_lo, y_hi = dpdz_y_limits_for_plot('f')
+    y_step = dpdz_y_major_step_for_plot('f')
+    if y_lo is not None or y_hi is not None:
+        style_axes_re_g_log_x(ax, y_major_step=y_step, y_lim_bottom=y_lo, y_lim_top=y_hi)
+        configure_dpdz_y_axis_minor_ticks(ax)
+    else:
+        style_axes_re_g_log_x(ax, y_major_step=0.5, y_lim_bottom=0, y_lim_top=None)
+    apply_two_row_top_legend(ax, re_sl_legend_handles_from_meta(legend_series_meta), legend_elements)
+    add_theta_and_mean_uncertainty_text(
+        ax, df_plot, theta, col_mapping,
+        uncertainty_key='U_dpdz_F', unit_latex=r'\mathrm{kPa/m}',
+        placement='top', fontsize=17, kind='kpa_per_m',
+    )
+    plt.tight_layout()
+    save_figure_to_sheet_dir(f'{sheet_name}_frictional_vs_Re_g', sheet_name)
 
-        Re_sl_legend_elements = re_sl_legend_handles_from_meta(legend_series_meta)
-        apply_two_row_top_legend(ax, Re_sl_legend_elements, legend_elements)
-        add_theta_and_mean_uncertainty_text(
-            ax,
-            df_plot,
-            theta,
-            col_mapping,
-            uncertainty_key='U_dpdz_F',
-            unit_latex=r'\mathrm{kPa/m}',
-            placement='top',
-            fontsize=17,
-            kind='kpa_per_m',
-        )
 
-        plt.tight_layout()
-        save_figure_to_sheet_dir(f'{sheet_name}_frictional_vs_Re_g', sheet_name)
 
-    except Exception as e:
-        print(f"Erro ao gerar plot: {e}")
-        import traceback
-        traceback.print_exc()
-
+@report_plot_errors('Erro ao gerar plot')
 def generate_dpdzt_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta):
     """
     Gera um plot científico de Re_sg vs dp/dz_T, onde cada Re_sl é uma série diferente.
     Inclui símbolos diferentes para cada Flow Pattern.
     """
-    try:
-        col_mapping = build_column_mapping(df)
-        miss = missing_column_keys(
-            col_mapping,
-            ['jG', 'jL', 'dp/dz_T', 'Flow Pattern', 'Temp.', 'Gauge Pressure'],
-        )
-        if miss:
-            print(f'Colunas ausentes para plot: {miss}')
-            print(f'Colunas disponíveis: {list(col_mapping.keys())}')
-            return
+    col_mapping = build_column_mapping(df)
+    miss = missing_column_keys(
+        col_mapping, ['jG', 'jL', 'dp/dz_T', 'Flow Pattern', 'Temp.', 'Gauge Pressure'],
+    )
+    if miss:
+        _print_missing_plot_columns(f'Colunas ausentes para plot: {miss}', col_mapping)
+        return
 
-        setup_plot_style()
-        fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
+    setup_plot_style()
+    fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
 
-        jl_col = col_mapping['jL']
-        compute_Re_sg_column(df, col_mapping, fluid_1)
+    jl_col = col_mapping['jL']
+    compute_Re_sg_column(df, col_mapping, fluid_1)
+    dp_dz_t_col = col_mapping['dp/dz_T']
+    flow_pattern_col = col_mapping['Flow Pattern']
 
-        dp_dz_t_col = col_mapping['dp/dz_T']
-        flow_pattern_col = col_mapping['Flow Pattern']
-        
-        # Padronizar antes de copiar; legendas de j_L usam valores medidos (jL_raw) agrupados
-        if 'Re_sl_group' not in df.columns:
-            standardize_liquid_conditions({sheet_name: df})
+    if 'Re_sl_group' not in df.columns:
+        standardize_liquid_conditions({sheet_name: df})
 
-        df_plot = df.copy().reset_index(drop=True)
-        if 'Re_sl_group' in df.columns:
-            df_plot['Re_sl_group'] = _one_col_series(df, 'Re_sl_group').values
-        if 'jL_raw' in df.columns:
-            df_plot['jL_raw'] = _one_col_series(df, 'jL_raw').values
-        _cluster_measured_jl_legend_labels(df_plot, jl_col)
-        jl_series = sorted(df_plot['_jl_legend_group_mean'].dropna().unique())
-        jl_series = [jl for jl in jl_series if pd.notna(jl)]
+    df_plot = df.copy().reset_index(drop=True)
+    if 'Re_sl_group' in df.columns:
+        df_plot['Re_sl_group'] = _one_col_series(df, 'Re_sl_group').values
+    if 'jL_raw' in df.columns:
+        df_plot['jL_raw'] = _one_col_series(df, 'jL_raw').values
+    _cluster_measured_jl_legend_labels(df_plot, jl_col)
+    jl_series = _jl_legend_series_means(df_plot)
 
-        # Obter séries únicas de Re_sl (agrupado/padronizado)
-        Re_sl_series = sorted(df_plot['Re_sl_group'].dropna().unique())
-        Re_sl_series = [re_l for re_l in Re_sl_series if pd.notna(re_l)]
-        
-        Re_sg_plot = _one_col_series(df_plot, 'Re_sg')
-        
-        print(f"Séries de jL (médias por grupo de valores medidos próximos): {jl_series}")
-        print(f"Séries de Re_sl (padronizado) encontradas: {Re_sl_series}")
+    Re_sl_series = _sorted_finite_unique(df_plot['Re_sl_group'])
+    Re_sg_plot = _one_col_series(df_plot, 'Re_sg')
 
-        line_styles, _ = get_series_line_and_marker_styles()
-        flow_pattern_symbols = get_flow_pattern_symbols()
-        dp_dz_t_unc_col = _find_point_uncertainty_column(df_plot, col_mapping, 'U_dpdz_T')
-        lowest_resl_uncertainty_indices = _indices_for_lowest_resl_series(
-            df_plot,
-            _one_col_series(df_plot, 'Re_sg'),
-            _one_col_series(df_plot, dp_dz_t_col),
-        )
-        legend_series_meta = []
+    print(f"Séries de jL (médias por grupo de valores medidos próximos): {jl_series}")
+    print(f"Séries de Re_sl (padronizado) encontradas: {Re_sl_series}")
 
-        for i, re_l in enumerate(Re_sl_series):
-            mask = _mask_re_sl_group(df_plot['Re_sl_group'], re_l)
+    line_styles, _ = get_series_line_and_marker_styles()
+    flow_pattern_symbols = get_flow_pattern_symbols()
+    dp_dz_t_unc_col = _find_point_uncertainty_column(df_plot, col_mapping, 'U_dpdz_T')
+    lowest_resl_uncertainty_indices = _indices_for_lowest_resl_series(
+        df_plot, _one_col_series(df_plot, 'Re_sg'), _one_col_series(df_plot, dp_dz_t_col),
+    )
+    legend_series_meta = []
 
-            total_data = _one_col_series_masked(df_plot, mask, dp_dz_t_col)
-            flow_pattern_data = _one_col_series_masked(df_plot, mask, flow_pattern_col)
-            Re_sg_masked = Re_sg_plot[mask]
-            valid_mask = pd.notna(Re_sg_masked) & pd.notna(total_data)
-            Re_sg_clean = Re_sg_masked[valid_mask]
-            total_clean = total_data[valid_mask] / 1000
-            flow_pattern_clean = flow_pattern_data[valid_mask]
-
-            if len(Re_sg_clean) > 0:
-                line_style = line_styles[i % len(line_styles)]
-                legend_series_meta.append((re_l, line_style))
-
-                sorted_data = sorted(zip(Re_sg_clean, total_clean, flow_pattern_clean))
-                Re_sg_sorted = [x[0] for x in sorted_data]
-                total_sorted = [x[1] for x in sorted_data]
-                flow_pattern_sorted = [x[2] for x in sorted_data]
-
-                ax.plot(
-                    Re_sg_sorted,
-                    total_sorted,
-                    line_style,
-                    color='black',
-                    linewidth=1.5,
-                    zorder=1,
-                )
-
-                for Re_sg_val, total_val, flow_pattern in zip(
-                    Re_sg_sorted, total_sorted, flow_pattern_sorted
-                ):
-                    pattern_data = style_for_flow_pattern_cell(
-                        flow_pattern, flow_pattern_symbols
-                    )
-                    symbol = pattern_data['symbol']
-                    color = pattern_data['color']
-                    ax.scatter(
-                        Re_sg_val,
-                        total_val,
-                        c=color,
-                        marker=symbol,
-                        s=100,
-                        edgecolors=color,
-                        linewidth=1,
-                        zorder=2,
-                    )
-
-                print(f"Plotando série Re_sl = {re_l:.1f} com {len(Re_sg_clean)} pontos")
-
-        n_unc = _plot_selected_y_uncertainty(
+    for i, re_l in enumerate(Re_sl_series):
+        mask = _mask_re_sl_group(df_plot['Re_sl_group'], re_l)
+        total_data = _one_col_series_masked(df_plot, mask, dp_dz_t_col)
+        flow_pattern_data = _one_col_series_masked(df_plot, mask, flow_pattern_col)
+        Re_sg_masked = Re_sg_plot[mask]
+        valid_mask = pd.notna(Re_sg_masked) & pd.notna(total_data)
+        line_style = line_styles[i % len(line_styles)]
+        n = _plot_sorted_series_with_flow_patterns(
             ax,
-            df_plot,
-            lowest_resl_uncertainty_indices,
-            'Re_sg',
-            dp_dz_t_col,
-            dp_dz_t_unc_col,
-            y_scale=1 / 1000,
+            Re_sg_masked[valid_mask],
+            total_data[valid_mask] / PA_TO_KPA,
+            flow_pattern_data[valid_mask],
+            line_style,
+            flow_pattern_symbols,
         )
-        if n_unc:
-            print(f"Incerteza de gradiente total incluida nos {n_unc} pontos de menor Re_sl.")
+        if n:
+            legend_series_meta.append((re_l, line_style))
+            print(f"Plotando série Re_sl = {re_l:.1f} com {n} pontos")
 
-        legend_elements = flow_pattern_legend_handles(
-            df_plot, flow_pattern_col, flow_pattern_symbols
-        )
+    n_unc = _plot_selected_y_uncertainty(
+        ax, df_plot, lowest_resl_uncertainty_indices, 'Re_sg', dp_dz_t_col, dp_dz_t_unc_col,
+        y_scale=1 / PA_TO_KPA,
+    )
+    if n_unc:
+        print(f"Incerteza de gradiente total incluida nos {n_unc} pontos de menor Re_sl.")
 
-        ax.set_xlabel(r'$Re_{sg}$ [-]', fontsize=26, fontfamily='serif')
-        ax.set_ylabel(YLABEL_DP_DZ_T, fontsize=26, fontfamily='serif')
-        y_lo, y_hi = dpdz_y_limits_for_plot('t')
-        y_step = dpdz_y_major_step_for_plot('t')
-        if y_lo is not None or y_hi is not None:
-            style_axes_re_g_log_x(
-                ax, y_major_step=y_step, y_lim_bottom=y_lo, y_lim_top=y_hi
-            )
-            configure_dpdz_y_axis_minor_ticks(ax)
-        else:
-            # Total: não forçar y ≥ 0 (gradiente pode ser negativo); ticks Y automáticos.
-            style_axes_re_g_log_x(ax, y_major_step=None, y_lim_bottom=None, y_lim_top=None)
+    legend_elements = flow_pattern_legend_handles(df_plot, flow_pattern_col, flow_pattern_symbols)
+    ax.set_xlabel(r'$Re_{sg}$ [-]', fontsize=26, fontfamily='serif')
+    ax.set_ylabel(YLABEL_DP_DZ_T, fontsize=26, fontfamily='serif')
+    y_lo, y_hi = dpdz_y_limits_for_plot('t')
+    y_step = dpdz_y_major_step_for_plot('t')
+    if y_lo is not None or y_hi is not None:
+        style_axes_re_g_log_x(ax, y_major_step=y_step, y_lim_bottom=y_lo, y_lim_top=y_hi)
+        configure_dpdz_y_axis_minor_ticks(ax)
+    else:
+        style_axes_re_g_log_x(ax, y_major_step=None, y_lim_bottom=None, y_lim_top=None)
+    apply_two_row_top_legend(ax, re_sl_legend_handles_from_meta(legend_series_meta), legend_elements)
+    add_theta_and_mean_uncertainty_text(
+        ax, df_plot, theta, col_mapping,
+        uncertainty_key='U_dpdz_T', unit_latex=r'\mathrm{kPa/m}',
+        placement='bottom_right', fontsize=17, kind='kpa_per_m',
+    )
+    plt.tight_layout()
+    save_figure_to_sheet_dir(f'{sheet_name}_total_vs_Re_g', sheet_name)
 
-        Re_sl_legend_elements = re_sl_legend_handles_from_meta(legend_series_meta)
-        apply_two_row_top_legend(ax, Re_sl_legend_elements, legend_elements)
-        add_theta_and_mean_uncertainty_text(
-            ax,
-            df_plot,
-            theta,
-            col_mapping,
-            uncertainty_key='U_dpdz_T',
-            unit_latex=r'\mathrm{kPa/m}',
-            placement='bottom_right',
-            fontsize=17,
-            kind='kpa_per_m',
-        )
-
-        plt.tight_layout()
-        save_figure_to_sheet_dir(f'{sheet_name}_total_vs_Re_g', sheet_name)
-
-    except Exception as e:
-        print(f"Erro ao gerar plot: {e}")
-        import traceback
-        traceback.print_exc()
 
 def create_orientation_summary_dataframe(all_dataframes, selected_sheets):
     """
@@ -4281,90 +3760,89 @@ def _generate_orientation_plot_for_quantity(
 
         plt.close(fig)
 
-def generate_frictional_vs_orientation_plot(all_dataframes, selected_sheets, units_dict):
-    """
-    Gera plots de fricção do tubo vs orientação do tubo agrupados por Re_sl.
-    Cada Re_sl gera um plot separado salvo no diretório orientation_plots.
-    
-    Args:
-        all_dataframes (dict): Dicionário com todos os DataFrames das abas
-        selected_sheets (list): Lista das abas selecionadas pelo usuário
-        units_dict (dict): Dicionário com as unidades das colunas
-    """
+
+def _run_orientation_quantity_plots(
+    all_dataframes,
+    selected_sheets,
+    *,
+    y_column,
+    y_label,
+    base_name_prefix,
+    error_prefix,
+    prepared=None,
+    units_dict=None,  # mantido por compatibilidade de assinatura; não usado
+):
+    """Prepara (ou reutiliza) o summary e gera plots de orientação para uma quantidade."""
     try:
-        summary_df, orientation_plots_dir, unique_re_sl = prepare_orientation_summary(
-            all_dataframes, selected_sheets
-        )
+        if prepared is None:
+            summary_df, orientation_plots_dir, unique_re_sl = prepare_orientation_summary(
+                all_dataframes, selected_sheets
+            )
+        else:
+            summary_df, orientation_plots_dir, unique_re_sl = prepared
         if summary_df is None:
             return
-
         _generate_orientation_plot_for_quantity(
             summary_df=summary_df,
             orientation_plots_dir=orientation_plots_dir,
             unique_re_sl=unique_re_sl,
-            y_column='frictional',
-            y_label=YLABEL_DP_DZ_F,
-            base_name_prefix='frictional_vs_orientation',
+            y_column=y_column,
+            y_label=y_label,
+            base_name_prefix=base_name_prefix,
             integer_x_axis=True,
         )
     except Exception as e:
-        print(f"Erro ao gerar plots de fricção vs orientação: {e}")
-        import traceback
+        print(f'{error_prefix}: {e}')
         traceback.print_exc()
 
 
-def generate_alpha_vs_orientation_plot(all_dataframes, selected_sheets, units_dict):
-    """
-    Gera plots de alpha vs orientação do tubo agrupados por Re_sl.
-    Cada Re_sl gera um plot separado salvo no diretório orientation_plots.
-    """
-    try:
-        summary_df, orientation_plots_dir, unique_re_sl = prepare_orientation_summary(
-            all_dataframes, selected_sheets
-        )
-        if summary_df is None:
-            return
-
-        _generate_orientation_plot_for_quantity(
-            summary_df=summary_df,
-            orientation_plots_dir=orientation_plots_dir,
-            unique_re_sl=unique_re_sl,
-            y_column='alpha',
-            y_label=r'$\alpha$ [-]',
-            base_name_prefix='alpha_vs_orientation',
-            integer_x_axis=True,
-        )
-    except Exception as e:
-        print(f"Erro ao gerar plots de alpha vs orientação: {e}")
-        import traceback
-        traceback.print_exc()
+def generate_frictional_vs_orientation_plot(
+    all_dataframes, selected_sheets, units_dict, *, prepared=None
+):
+    """Plots de fricção vs orientação agrupados por Re_sl."""
+    _run_orientation_quantity_plots(
+        all_dataframes,
+        selected_sheets,
+        y_column='frictional',
+        y_label=YLABEL_DP_DZ_F,
+        base_name_prefix='frictional_vs_orientation',
+        error_prefix='Erro ao gerar plots de fricção vs orientação',
+        prepared=prepared,
+        units_dict=units_dict,
+    )
 
 
-def generate_total_vs_orientation_plot(all_dataframes, selected_sheets, units_dict):
-    """
-    Gera plots de gradiente total de pressão vs orientação do tubo agrupados por Re_sl.
-    Cada Re_sl gera um plot separado salvo no diretório orientation_plots.
-    """
-    try:
-        summary_df, orientation_plots_dir, unique_re_sl = prepare_orientation_summary(
-            all_dataframes, selected_sheets
-        )
-        if summary_df is None:
-            return
+def generate_alpha_vs_orientation_plot(
+    all_dataframes, selected_sheets, units_dict, *, prepared=None
+):
+    """Plots de alpha vs orientação agrupados por Re_sl."""
+    _run_orientation_quantity_plots(
+        all_dataframes,
+        selected_sheets,
+        y_column='alpha',
+        y_label=r'$\alpha$ [-]',
+        base_name_prefix='alpha_vs_orientation',
+        error_prefix='Erro ao gerar plots de alpha vs orientação',
+        prepared=prepared,
+        units_dict=units_dict,
+    )
 
-        _generate_orientation_plot_for_quantity(
-            summary_df=summary_df,
-            orientation_plots_dir=orientation_plots_dir,
-            unique_re_sl=unique_re_sl,
-            y_column='total',
-            y_label=YLABEL_DP_DZ_T,
-            base_name_prefix='total_vs_orientation',
-            integer_x_axis=True,
-        )
-    except Exception as e:
-        print(f"Erro ao gerar plots de gradiente total vs orientação: {e}")
-        import traceback
-        traceback.print_exc()
+
+def generate_total_vs_orientation_plot(
+    all_dataframes, selected_sheets, units_dict, *, prepared=None
+):
+    """Plots de gradiente total vs orientação agrupados por Re_sl."""
+    _run_orientation_quantity_plots(
+        all_dataframes,
+        selected_sheets,
+        y_column='total',
+        y_label=YLABEL_DP_DZ_T,
+        base_name_prefix='total_vs_orientation',
+        error_prefix='Erro ao gerar plots de gradiente total vs orientação',
+        prepared=prepared,
+        units_dict=units_dict,
+    )
+
 
 def get_user_sheet_selection(excel_file, sheet_names=None):
     """
@@ -4462,147 +3940,69 @@ def main():
         else:
             # DataFrame único
             analyze_dataframe(df)
-            
-        # Salvar informações em um arquivo de log
-        # log_file = f"excel_analysis_log_{Path(file_path).stem}.txt"
-        # with open(log_file, 'w', encoding='utf-8') as f:
-        #     f.write(f"Análise do arquivo: {file_path}\n")
-        #     f.write(f"Data/hora: {pd.Timestamp.now()}\n\n")
-            
-        #     if isinstance(df, dict):
-        #         for sheet_name, sheet_df in df.items():
-        #             f.write(f"=== ABA: {sheet_name} ===\n")
-        #             f.write(f"Dimensões: {sheet_df.shape}\n")
-        #             f.write(f"Colunas: {list(sheet_df.columns)}\n")
-        #             f.write(f"Unidades: {units[sheet_name]}\n\n")
-        #     else:
-        #         f.write(f"Dimensões: {df.shape}\n")
-        #         f.write(f"Colunas: {list(df.columns)}\n")
-        #         f.write(f"Unidades: {units}\n\n")
-        
-        # print(f"Arquivos salvos: {output_file}, {log_file}")
-        
+
         # Gerar plots individuais apenas se não foi escolhido 'all'
         if not is_all_selected:
             print("\n" + "="*60)
             print("GERANDO PLOTS INDIVIDUAIS")
             print("="*60)
-            
-            # Gerar plot científico jG vs α
-            if isinstance(df, dict):
-                for sheet_name, sheet_df in df.items():
-                    # Extrair informações do nome da aba para cada aba
-                    fluid_1, fluid_2, direction, theta, ID, is_validation = extract_info_from_filename(sheet_name)
-                    if direction == 'Downward':
-                        theta = -theta
-                    generate_alpha_vs_jg_plot(sheet_df, sheet_name, fluid_1, fluid_2, theta)
-            else:
-                generate_alpha_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta)
+
+            # Ordem idêntica à versão original
+            _run_plot_on_sheets(
+                generate_alpha_vs_jg_plot, df, sheet_name, fluid_1, fluid_2, theta
+            )
 
             # Paridade α vs β homogêneo — apenas uma inclinação (uma única aba nos dados)
             if isinstance(df, dict):
                 if len(df) == 1:
                     sheet_name_pb, sheet_df_pb = next(iter(df.items()))
-                    fluid_1_pb, fluid_2_pb, direction_pb, theta_pb, ID_pb, is_validation_pb = (
-                        extract_info_from_filename(sheet_name_pb)
-                    )
-                    if direction_pb == 'Downward':
-                        theta_pb = -theta_pb
-                    generate_alpha_vs_beta_homogeneous_parity_plot(
-                        sheet_df_pb, sheet_name_pb, fluid_1_pb, fluid_2_pb, theta_pb
+                    _run_plot_on_sheets(
+                        generate_alpha_vs_beta_homogeneous_parity_plot,
+                        {sheet_name_pb: sheet_df_pb},
                     )
             else:
                 generate_alpha_vs_beta_homogeneous_parity_plot(
                     df, sheet_name, fluid_1, fluid_2, theta
                 )
 
-            # Matriz experimental j_L vs j_G (log-log) com flow patterns — apenas sem opção 'all'
-            if isinstance(df, dict):
-                for sheet_name, sheet_df in df.items():
-                    fluid_1, fluid_2, direction, theta, ID, is_validation = extract_info_from_filename(sheet_name)
-                    if direction == 'Downward':
-                        theta = -theta
-                    generate_jl_vs_jg_flow_pattern_matrix_plot(
-                        sheet_df, sheet_name, fluid_1, fluid_2, theta
-                    )
-            else:
-                generate_jl_vs_jg_flow_pattern_matrix_plot(
-                    df, sheet_name, fluid_1, fluid_2, theta
-                )
-            
-            if isinstance(df, dict):
-                for sheet_name, sheet_df in df.items():
-                    # Extrair informações do nome da aba para cada aba
-                    fluid_1, fluid_2, direction, theta, ID, is_validation = extract_info_from_filename(sheet_name)
-                    if direction == 'Downward':
-                        theta = -theta
-                    generate_dpdzf_vs_jg_plot(sheet_df, sheet_name, fluid_1, fluid_2, theta)
-            else:
-                generate_dpdzf_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta)
-
-            if isinstance(df, dict):
-                for sheet_name, sheet_df in df.items():
-                    fluid_1, fluid_2, direction, theta, ID, is_validation = extract_info_from_filename(sheet_name)
-                    if direction == 'Downward':
-                        theta = -theta
-                    generate_dpdzt_vs_jg_plot(sheet_df, sheet_name, fluid_1, fluid_2, theta)
-            else:
-                generate_dpdzt_vs_jg_plot(df, sheet_name, fluid_1, fluid_2, theta)
-            
-            if isinstance(df, dict):
-                for sheet_name, sheet_df in df.items():
-                    # Extrair informações do nome da aba para cada aba
-                    fluid_1, fluid_2, direction, theta, ID, is_validation = extract_info_from_filename(sheet_name)
-                    if direction == 'Downward':
-                        theta = -theta
-                    generate_dpdzf_vs_Reg_plot(sheet_df, sheet_name, fluid_1, fluid_2, theta)
-            else:
-                generate_dpdzf_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta)
-
-            if isinstance(df, dict):
-                for sheet_name, sheet_df in df.items():
-                    fluid_1, fluid_2, direction, theta, ID, is_validation = extract_info_from_filename(sheet_name)
-                    if direction == 'Downward':
-                        theta = -theta
-                    generate_alpha_vs_Reg_plot(sheet_df, sheet_name, fluid_1, fluid_2, theta)
-            else:
-                generate_alpha_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta)
-
-            if isinstance(df, dict):
-                for sheet_name, sheet_df in df.items():
-                    # Extrair informações do nome da aba para cada aba
-                    fluid_1, fluid_2, direction, theta, ID, is_validation = extract_info_from_filename(sheet_name)
-                    if direction == 'Downward':
-                        theta = -theta
-                    generate_dpdzt_vs_Reg_plot(sheet_df, sheet_name, fluid_1, fluid_2, theta)
-            else:
-                generate_dpdzt_vs_Reg_plot(df, sheet_name, fluid_1, fluid_2, theta)
+            for plot_fn in (
+                generate_jl_vs_jg_flow_pattern_matrix_plot,
+                generate_dpdzf_vs_jg_plot,
+                generate_dpdzt_vs_jg_plot,
+                generate_dpdzf_vs_Reg_plot,
+                generate_alpha_vs_Reg_plot,
+                generate_dpdzt_vs_Reg_plot,
+            ):
+                _run_plot_on_sheets(plot_fn, df, sheet_name, fluid_1, fluid_2, theta)
         else:
             print("\n" + "="*60)
             print("OPÇÃO 'ALL' SELECIONADA - PULANDO PLOTS INDIVIDUAIS")
             print("="*60)
-            
-        # Nova funcionalidade: Plots de fricção/alpha/gradiente total vs orientação
+
+        # Plots de fricção/alpha/gradiente total vs orientação
         if is_all_selected:
-            # Se 'all' foi selecionado, gerar automaticamente os gráficos de orientação
             print("\n" + "="*60)
             print("GERANDO GRÁFICOS DE ORIENTAÇÃO (FRICCIONAL / ALPHA / TOTAL)")
             print("="*60)
-            
+
             if isinstance(df, dict):
                 selected = list(df.keys())
                 print(f"\nProcessando todas as abas carregadas: {selected}")
-                generate_frictional_vs_orientation_plot(df, selected, units)
-                generate_alpha_vs_orientation_plot(df, selected, units)
-                generate_total_vs_orientation_plot(df, selected, units)
+                prepared = prepare_orientation_summary(df, selected)
+                generate_frictional_vs_orientation_plot(df, selected, units, prepared=prepared)
+                generate_alpha_vs_orientation_plot(df, selected, units, prepared=prepared)
+                generate_total_vs_orientation_plot(df, selected, units, prepared=prepared)
                 if len(selected) >= 2:
                     generate_jl_vs_jg_flow_pattern_matrix_mosaic_plot(df, selected)
             else:
-                # Para uma única aba, usar diretamente
                 print(f"\nProcessando aba única: {sheet_name}")
-                generate_frictional_vs_orientation_plot({sheet_name: df}, [sheet_name], {sheet_name: units})
-                generate_alpha_vs_orientation_plot({sheet_name: df}, [sheet_name], {sheet_name: units})
-                generate_total_vs_orientation_plot({sheet_name: df}, [sheet_name], {sheet_name: units})
+                single = {sheet_name: df}
+                selected = [sheet_name]
+                units_map = {sheet_name: units}
+                prepared = prepare_orientation_summary(single, selected)
+                generate_frictional_vs_orientation_plot(single, selected, units_map, prepared=prepared)
+                generate_alpha_vs_orientation_plot(single, selected, units_map, prepared=prepared)
+                generate_total_vs_orientation_plot(single, selected, units_map, prepared=prepared)
     else:
         print("Falha ao carregar o arquivo Excel.")
 
